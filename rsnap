@@ -1,0 +1,660 @@
+#!/usr/bin/perl
+#
+# Copyright (C) 2008-2013 Oliver Hitz <oliver@net-track.ch>
+#
+use POSIX qw(strftime);
+use Digest::MD5 qw(md5_hex);
+use Getopt::Long;
+use threads;
+use threads::shared;
+use strict;
+
+my $debug_on;
+my $configfile = "/etc/rsnap.conf";
+
+if (!GetOptions( "debug" => \$debug_on, "config=s" => \$configfile)) {
+  print "Usage: $0 --config=rsnap.conf --debug host1 .. hostN\n";
+  exit 1;
+}
+
+# The remaining options are host names. We take note of them using the
+# hash rsnap_hosts.
+my %rsnap_hosts;
+
+if ($#ARGV >= 0) {
+  foreach my $h (@ARGV) {
+    $rsnap_hosts{$h} = 1;
+  }
+} else {
+  # All hosts
+  $rsnap_hosts{"*"} = 1;
+}
+
+# Read the configuration file.
+my %config;
+my %hosts;
+
+open(FILE, $configfile) || die "Failed to open $configfile\n";
+my @lines = <FILE>;
+close(FILE);
+eval("@lines");
+die "Failed to eval() file $configfile:\n$@\n" if ($@);
+
+# Check if already running.
+if (-f $config{"lockfile"}) {
+  exit 0;
+}
+open LOCK, ">".$config{"lockfile"};
+close LOCK;
+
+# Create the backup hosts and jobs structure.
+my %scheduled_hosts : shared;
+my @scheduled_jobs : shared;
+my @finished_jobs : shared;
+
+for my $h (keys %hosts) {
+  my $host = $hosts{$h};
+
+  # If the hash rsnap_hosts is not empty and this host is not in the
+  # hash, we skip it.
+  if (!defined $rsnap_hosts{"*"} && !defined $rsnap_hosts{$h}) {
+    next;
+  }
+
+  # Create the host structure.
+  $scheduled_hosts{$h} = &share({});
+  $scheduled_hosts{$h}{"hostname"} = $h;
+
+  if (defined $host->{"host_parallel"}) {
+    $scheduled_hosts{$h}{"host_parallel"} = $host->{"host_parallel"};
+  } else {
+    $scheduled_hosts{$h}{"host_parallel"} = $config{"host_parallel"};
+  }
+  if (defined $host->{"rotate"}) {
+    $scheduled_hosts{$h}{"rotate"} = $host->{"rotate"};
+  } else {
+    $scheduled_hosts{$h}{"rotate"} = $config{"rotate"};
+  }
+  if (defined $host->{"exclude"}) {
+    $scheduled_hosts{$h}{"exclude"} = $host->{"exclude"};
+  } else {
+    $scheduled_hosts{$h}{"exclude"} = $config{"exclude"};
+  }
+  if (defined $host->{"group"}) {
+    $scheduled_hosts{$h}{"dir"} = $config{"snapshot_root"}."/".$host->{"group"}."/".$h;
+  } else {
+    $scheduled_hosts{$h}{"dir"} = $config{"snapshot_root"}."/".$h;
+  }
+
+  $scheduled_hosts{$h}{"initialized"} = undef;
+
+  $scheduled_hosts{$h}{"errors"} = 0;
+  $scheduled_hosts{$h}{"error_messages"} = "";
+
+  $scheduled_hosts{$h}{"files_total"} = 0;
+  $scheduled_hosts{$h}{"files_sent"} = 0;
+  $scheduled_hosts{$h}{"bytes_total"} = 0;
+  $scheduled_hosts{$h}{"bytes_sent"} = 0;
+  $scheduled_hosts{$h}{"duration"} = 0;
+
+  $scheduled_hosts{$h}{"jobs"} = 0;
+
+  # Create the jobs structure.
+  my $filters = undef;
+  if (defined $host->{"filters"}) {
+    $filters = $host->{"filters"};
+  } elsif (defined $config{"filters"}) {
+    $filters = $config{"filters"};
+  }
+
+  if (!$filters) {
+    # Only one job, backup the entire host.
+    my $j = $#scheduled_jobs+1;
+    $scheduled_jobs[$j] = &share({});
+    $scheduled_jobs[$j]{"hostname"} = $h;
+    $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
+    $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
+    $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
+
+    $scheduled_hosts{$h}{"jobs"}++;
+
+    debug("Scheduling job for host $h\n");
+  } else {
+    # Iterate through the filters.
+    foreach my $f (@{ $filters }) {
+      my $j = $#scheduled_jobs+1;
+      $scheduled_jobs[$j] = &share({});
+      $scheduled_jobs[$j]{"hostname"} = $h;
+      $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
+      $scheduled_jobs[$j]{"filter"} = $f;
+      $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
+      $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
+
+      $scheduled_hosts{$h}{"jobs"}++;
+
+      debug("Scheduling job for host $h\n");
+    }
+  }
+}
+
+# Sort the jobs by duration (longest job first).
+@scheduled_jobs = sort { $b->{"last_duration"} <=> $a->{"last_duration"} } @scheduled_jobs;
+
+# Start the backup threads
+my $rsnap_lock : shared;
+my @threads = ();
+
+for (my $i = 0; $i < $config{"threads"}; $i++) {
+  push @threads, threads->create("backup_thread", $i);
+}
+
+for my $thread (@threads) {
+  $thread->join;
+}
+
+# Finalize the backups.
+foreach my $host (values %scheduled_hosts) {
+  backup_finalize($host);
+}
+
+# Create and send report.
+my $report = "";
+
+foreach my $h (sort keys %scheduled_hosts) {
+  my $host = $scheduled_hosts{$h};
+
+  if ($host->{"errors"} > 0) {
+    if ($report eq "") {
+      $report .= "rsnap errors:\n\n";
+    }
+    if ($host->{"jobs"} > 1) {
+      $report .= sprintf("%s (%d job out of %d failed):\n",
+			 $host->{"hostname"},
+			 $host->{"errors"},
+			 $host->{"jobs"});
+      $report .= $host->{"error_messages"};
+    } else {
+      $report .= sprintf("%s: %s",
+			 $host->{"hostname"},
+			 $host->{"error_messages"});
+    }
+  }
+}
+
+if ($report ne "") {
+  $report .= "\n\n";
+}
+
+$report .= "                         Files             Size in GB\n";
+$report .= "Host                     Total    Sent     Total    Sent     Time\n";
+$report .= "------------------------ -------- -------- -------- -------- -----\n";
+
+foreach my $h (sort keys %scheduled_hosts) {
+  my $host = $scheduled_hosts{$h};
+
+  if ($host->{"errors"} == 0) {
+    $report .= sprintf("%-24.24s %8d %8d %8.2f %8.2f %2d:%02d\n",
+		       $host->{"hostname"},
+		       $host->{"files_total"},
+		       $host->{"files_sent"},
+		       $host->{"bytes_total"} / 1024.0,
+		       $host->{"bytes_sent"} / 1024.0,
+		       ($host->{"duration"} / 60) / 60,
+		       ($host->{"duration"} / 60) % 60);
+  }
+}
+
+# Send report by email if configured.
+if ($config{"email_to"} ne "") {
+  open MAIL,"|".$config{"sendmail_program"}." ".$config{"email_to"};
+  print MAIL "From: ".$config{"email_from"}."\n";
+  print MAIL "To: ".$config{"email_to"}."\n";
+  print MAIL "Subject: ".$config{"email_subject"}."\n";
+  print MAIL "\n";
+  print MAIL $report;
+  close MAIL;
+}
+  
+debug($report);
+
+# Create the "okfile" once the backup is done.
+if (-f $config{"okfile"}) {
+  unlink $config{"okfile"};
+}
+open OK, ">".$config{"okfile"};
+close OK;
+
+# Clean up
+my @cleanup_dirs : shared;
+
+foreach my $h (sort keys %scheduled_hosts) {
+  push @cleanup_dirs, $scheduled_hosts{$h}{"dir"};
+}
+
+@threads = ();
+
+for (my $i = 0; $i < $config{"threads"}; $i++) {
+  push @threads, threads->create("cleanup_thread", $i);
+}
+
+# If we were backing up all hosts, and if an after_backup_script is
+# defined, run it now while the cleanup threads are running.
+if (defined $rsnap_hosts{"*"}) {
+  if (defined $config{"after_backup_script"}) {
+    $report = "";
+
+    open AFTERBACKUP, $config{"after_backup_script"}." 2>&1 |";
+    while (my $line = <AFTERBACKUP>) {
+      $report .= $line;
+    }
+    close AFTERBACKUP;
+
+    # Send report by email if configured.
+    if ($config{"after_backup_email_to"} ne "") {
+      open MAIL,"|".$config{"sendmail_program"}." ".$config{"after_backup_email_to"};
+      print MAIL "From: ".$config{"email_from"}."\n";
+      print MAIL "To: ".$config{"after_backup_email_to"}."\n";
+      print MAIL "Subject: ".$config{"after_backup_email_subject"}."\n";
+      print MAIL "\n";
+      print MAIL $report;
+      close MAIL;
+    }
+  }
+}
+
+# Now, wait for the cleanup threads to finish.
+for my $thread (@threads) {
+  $thread->join;
+}
+
+# Remove lockfile
+unlink $config{"lockfile"};
+
+exit 0;
+
+# ----------------------------------------------------------------------------
+# Output a debug message.
+#
+sub debug
+{
+  my ($message) = @_;
+
+  if ($debug_on) {
+    print $message;
+  }
+}
+
+# ----------------------------------------------------------------------------
+# The backup main program.
+#
+sub backup_thread
+{
+  my ($number) = @_;
+  debug("Backup thread $number: started.\n");
+
+  # Initialize thread environment
+  my $tempdir = $config{"temp_dir"}."/rsnap.".$$.".".$number;
+
+  # Ensure the temporary directory doesn't exist
+  if (-d $tempdir) {
+    return;
+  }
+
+  mkdir $tempdir;
+
+  while (has_backup_jobs()) {
+    my ($job) = next_backup_job();
+    if ($job) {
+      my $start = time();
+      debug("Backup thread $number: got job ".$job->{"hostname"}."\n");
+
+      my ($status, $files_total, $files_sent, $bytes_total, $bytes_sent) = backup($job, $tempdir);
+
+      my $duration = time() - $start;
+      debug("Backup thread $number: finished job in $duration seconds.\n");
+      backup_job_done($job, $duration, $status, $files_total, $files_sent, $bytes_total, $bytes_sent);
+    } else {
+      # Wait a couple of seconds before retrying.
+      debug("Backup thread $number: idle.\n");
+      sleep(2);
+    }
+  }
+
+  rmdir $tempdir;
+
+  debug("Backup thread $number: ended.\n");
+}
+
+# ----------------------------------------------------------------------------
+# Cleanup program.
+#
+sub cleanup_thread
+{
+  my ($number) = @_;
+  debug("Cleanup thread $number: started.\n");
+
+  while (1) {
+    my ($dir) = next_cleanup_dir();
+    if (!defined $dir) {
+      last;
+    }
+
+    my $deldir = $dir."/".$config{"archive_name"}.".delete";
+
+    `/bin/rm -rf $deldir`;
+
+    debug("Cleanup thread $number: cleaned up $dir.\n");
+  }
+
+  debug("Cleanup thread $number: ended.\n");
+}
+
+# ----------------------------------------------------------------------------
+# Returns the last duration of the specified backup job.
+#
+sub get_last_duration
+{
+  my ($job) = @_;
+
+  my $lddir = $job->{"dir"}."/.rsnap";
+
+  if (! -d $lddir) {
+    # The .rsnap directory doesn't exist.
+    return 0;
+  }
+
+  my $hash = md5_hex($job->{"hostname"}.".".$job->{"filter"});
+
+  # Try to open the last_duration file
+  open LD, $lddir."/".$hash or return 0;
+  my $last_duration = int <LD>;
+  close LD;
+
+  return $last_duration;
+}
+
+# ----------------------------------------------------------------------------
+# Store the last duration of the specified backup job.
+#
+sub store_last_duration
+{
+  my ($job) = @_;
+
+  my $lddir = $job->{"dir"}."/.rsnap";
+
+  if (! -d $lddir) {
+    mkdir $lddir;
+  }
+
+  my $hash = md5_hex($job->{"hostname"}.".".$job->{"filter"});
+
+  # Create the last_duration file.
+  open LD, ">".$lddir."/".$hash or return 0;
+  print LD $job->{"last_duration"};
+  close LD;
+}
+
+# ----------------------------------------------------------------------------
+# Returns the next cleanup directory.
+#
+sub next_cleanup_dir
+{
+  lock($rsnap_lock);
+
+  if ($#cleanup_dirs >= 0) {
+    return pop @cleanup_dirs;
+  }
+
+  return undef;
+}
+
+# ----------------------------------------------------------------------------
+# Checks if there are any backup jobs left.
+#
+sub has_backup_jobs
+{
+  lock($rsnap_lock);
+  return $#scheduled_jobs >= 0;
+}
+
+# ----------------------------------------------------------------------------
+# Returns the next backup job.
+#
+sub next_backup_job
+{
+  lock($rsnap_lock);
+
+  for (my $i = 0; $i <= $#scheduled_jobs; $i++) {
+    my $job = $scheduled_jobs[$i];
+    my $host = $scheduled_hosts{$job->{"hostname"}};
+
+    # Check if the host in question still has capacity for this job.
+    if ($host->{"in_progress"} < $host->{"host_parallel"}) {
+      # Yes, there is enough capacity
+
+      # Remove the job from the list of jobs.
+      for (my $j = $i; $j <= $#scheduled_jobs-1; $j++) {
+	$scheduled_jobs[$j] = $scheduled_jobs[$j+1];
+      }
+      pop @scheduled_jobs;
+
+      # This host has one more job in progress.
+      $host->{"in_progress"}++;
+
+      # Initialize backup for this host.
+      if (!$host->{"initialized"}) {
+	backup_initialize_host($host);
+	$host->{"initialized"} = 1;
+      }
+
+      return $job;
+    }
+  }
+
+  return undef;
+}
+
+# ----------------------------------------------------------------------------
+# Signals that a backup job is done.
+#
+sub backup_job_done
+{
+  lock($rsnap_lock);
+
+  my ($job, $duration, $status, $files_total, $files_sent, $bytes_total, $bytes_sent) = @_;
+
+  $job->{"last_duration"} = $duration;
+
+  my $host = $scheduled_hosts{$job->{"hostname"}};
+  $host->{"in_progress"}--;
+  $host->{"files_total"} += $files_total;
+  $host->{"files_sent"} += $files_sent;
+  $host->{"bytes_total"} += $bytes_total;
+  $host->{"bytes_sent"} += $bytes_sent;
+  $host->{"duration"} += $duration;
+
+  if ($status != 0 && $status != 23 && $status != 24) {
+    $host->{"errors"}++;
+    if (defined $job->{"filter"}) {
+      $host->{"error_messages"} .= " exit status ".$status."\n";
+      $host->{"error_messages"} .= " filter: ".$job->{"filter"}."\n";
+    } else {
+      $host->{"error_messages"} .= " exit status ".$status."\n";
+    }
+  }
+
+  store_last_duration($job);
+
+  # Push the finished job into the "finished_jobs" queue.
+  push @finished_jobs, $job;
+}
+
+# ----------------------------------------------------------------------------
+# Initialize a backup directory.
+#
+sub backup_initialize_host
+{
+  my ($host) = @_;
+
+  my $root = $host->{"dir"};
+
+  # Ensure the backup root directory exists.
+  if (! -d $root) {
+    mkdir $root;
+  }
+
+  # Create a new working directory if it doesn't already exist.
+  if (! -d $root."/".$config{"archive_name"}) {
+    mkdir $root."/".$config{"archive_name"};
+  }
+}
+
+# ----------------------------------------------------------------------------
+# Finalize a backup.
+#
+sub backup_finalize
+{
+  my ($host) = @_;
+  my $root = $host->{"dir"};
+
+  if ($host->{"errors"} == 0) {
+
+    # Rename the "working" directory.
+    if (-d $root."/".$config{"archive_name"}) {
+      my $date_now = strftime "%Y%m%d", localtime;
+      my $cnt_found;
+
+      # Find the newest YYYYMMDD.NNN file.
+      opendir(DIR, $root);
+      while (my $dir = readdir(DIR)) {
+	if (-d $root."/".$dir && $dir =~ /^$config{"archive_name"}\.$date_now\.(\d.*)$/) {
+	  my $cnt = $1;
+	  if (!defined $cnt_found || ($cnt > $cnt_found)) {
+	    $cnt_found = $1;
+	  }
+	}
+      }
+      closedir DIR;
+
+      my $suffix;
+
+      if (!defined $cnt_found) {
+	$suffix = sprintf("%s.%03d", $date_now, 0);
+      } else {
+	$suffix = sprintf("%s.%03d", $date_now, $cnt_found+1);
+      }
+
+      debug("Renaming working directory: ".$root."/".$config{"archive_name"}." -> ".$root."/".$config{"archive_name"}.".".$suffix."\n");
+      rename $root."/".$config{"archive_name"}, $root."/".$config{"archive_name"}.".".$suffix;
+
+      # Remove the "latest" symlink.
+      if (-l $root."/".$config{"archive_name"}.".latest") {
+	unlink $root."/".$config{"archive_name"}.".latest";
+      }
+
+      # Create new "latest" symlink.
+      `ln -s $config{"archive_name"}.$suffix $root/$config{"archive_name"}.latest`;
+    }
+
+    # Create the .delete directory
+    if (! -d $root."/".$config{"archive_name"}.".delete") {
+      mkdir $root."/".$config{"archive_name"}.".delete";
+    }
+    
+    # Get the list of all snapshot.YYYYMMDD directories.
+    my @dirs = ();
+
+    opendir(DIR, $root);
+    while (my $dir = readdir(DIR)) {
+      if (-d $root."/".$dir && $dir =~ /^$config{"archive_name"}\.(\d.*)$/) {
+	push @dirs, $dir;
+      }
+    }
+    closedir DIR;
+
+    @dirs = sort @dirs;
+
+    # Pop directories which should be kept from the dirs array.
+    for (my $i = 0; $i < $host->{"rotate"}; $i++) {
+      pop @dirs;
+    }
+
+    # Move all other directories into the .delete subdir.
+    foreach my $dir (@dirs) {
+      debug("Renaming directory to delete: ".$root."/".$dir." -> ".$root."/".$config{"archive_name"}.".delete/".$dir."\n");
+      rename $root."/".$dir, $root."/".$config{"archive_name"}.".delete/".$dir;
+    }
+  }
+}
+
+# ----------------------------------------------------------------------------
+# The backup job.
+#
+sub backup
+{
+  my ($job, $tempdir) = @_;
+
+  my $root = $job->{"dir"};
+
+  my $rsync_command = $config{"rsync_program"}." ".$config{"rsync_options"};
+
+  # General options
+  $rsync_command .= " --archive";
+  $rsync_command .= " --delete";
+  $rsync_command .= " --numeric-ids";
+  $rsync_command .= " --stats";
+
+  # RSH
+  $rsync_command .= " --rsh=\"".$config{"rsh_program"}."\"";
+
+  # Append excludes
+  $rsync_command .= " ".$job->{"exclude"};
+
+  # Create the filter file if necessary
+  if (defined $job->{"filter"}) {
+    open FILTER, ">".$tempdir."/filter";
+    print FILTER $job->{"filter"};
+    print FILTER "\n";
+    close FILTER;
+    $rsync_command .= " \"--filter=. ".$tempdir."/filter\"";
+  }
+
+  # If there is an older snapshot, set the link-dist option
+  if (-l $root."/".$config{"archive_name"}.".latest") {
+    $rsync_command .= " --link-dest=".$root."/".$config{"archive_name"}.".latest/";
+  }
+
+  # Append host and destination directory
+  $rsync_command .= " ".$job->{"hostname"}.":/";
+  $rsync_command .= " ".$root."/".$config{"archive_name"}."/";
+
+  my $files_total;
+  my $files_sent;
+  my $bytes_total;
+  my $bytes_sent;
+
+  # Execute command
+  open RSYNC, $rsync_command." 2>&1 |";
+
+  # Parse output
+  while (my $line = <RSYNC>) {
+    if ($line =~ /^Number of files: (\d+)$/) {
+      $files_total = $1;
+    } elsif ($line =~ /^Number of files transferred: (\d+)$/) {
+      $files_sent = $1;
+    } elsif ($line =~ /^Total file size: (\d+) bytes$/) {
+      $bytes_total = $1 / (1024*1024);
+    } elsif ($line =~ /^Total transferred file size: (\d+) bytes$/) {
+      $bytes_sent = $1 / (1024*1024);
+    }
+  }
+  close RSYNC;
+
+  # Status code
+  my $status = $? >> 8;
+
+  # Cleanup temporary files
+  unlink $tempdir."/filter" if -f $tempdir."/filter";
+
+  return ($status, $files_total, $files_sent, $bytes_total, $bytes_sent);
+}
