@@ -11,9 +11,10 @@ use strict;
 
 my $debug_on;
 my $configfile = "/etc/rsnap.conf";
+my $simulate_on;
 
-if (!GetOptions( "debug" => \$debug_on, "config=s" => \$configfile)) {
-  print "Usage: $0 --config=rsnap.conf --debug host1 .. hostN\n";
+if (!GetOptions( "simulate" => \$simulate_on, "debug" => \$debug_on, "config=s" => \$configfile)) {
+  print "Usage: $0 --config=rsnap.conf --simulate --debug host1 .. hostN\n";
   exit 1;
 }
 
@@ -34,14 +35,18 @@ if ($#ARGV >= 0) {
 my %config;
 my %hosts;
 
+if_simulate("Reading config file $configfile");
 open(FILE, $configfile) || die "Failed to open $configfile\n";
 my @lines = <FILE>;
 close(FILE);
+if_simulate("Evaluating config file");
 eval("@lines");
 die "Failed to eval() file $configfile:\n$@\n" if ($@);
+if_simulate("Config file ok");
 
 # Check if already running.
 if (-f $config{"lockfile"}) {
+  if_simulate("Backup is already running! Check out lock file " . $config{"lockfile"});
   exit 0;
 }
 open LOCK, ">".$config{"lockfile"};
@@ -107,35 +112,43 @@ for my $h (keys %hosts) {
     $filters = $config{"filters"};
   }
 
-  if (!$filters) {
-    # Only one job, backup the entire host.
-    my $j = $#scheduled_jobs+1;
-    $scheduled_jobs[$j] = &share({});
-    $scheduled_jobs[$j]{"hostname"} = $h;
-    $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
-    $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
-    $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
-
-    $scheduled_hosts{$h}{"jobs"}++;
-
-    debug("Scheduling job for host $h\n");
-  } else {
-    # Iterate through the filters.
-    foreach my $f (@{ $filters }) {
+  if (!$simulate_on) {
+    if (!$filters) {
+      # Only one job, backup the entire host.
       my $j = $#scheduled_jobs+1;
       $scheduled_jobs[$j] = &share({});
       $scheduled_jobs[$j]{"hostname"} = $h;
       $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
-      $scheduled_jobs[$j]{"filter"} = $f;
       $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
       $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
 
       $scheduled_hosts{$h}{"jobs"}++;
 
       debug("Scheduling job for host $h\n");
+    } else {
+      # Iterate through the filters.
+      foreach my $f (@{ $filters }) {
+        my $j = $#scheduled_jobs+1;
+        $scheduled_jobs[$j] = &share({});
+        $scheduled_jobs[$j]{"hostname"} = $h;
+        $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
+        $scheduled_jobs[$j]{"filter"} = $f;
+        $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
+        $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
+
+        $scheduled_hosts{$h}{"jobs"}++;
+
+        debug("Scheduling job for host $h\n");
+      }
     }
   }
+  else
+  {
+    if_simulate("Scheduling job for host $h");
+  }
 }
+
+if ($simulate_on) { goto CLEANUP };
 
 # Sort the jobs by duration (longest job first).
 @scheduled_jobs = sort { $b->{"last_duration"} <=> $a->{"last_duration"} } @scheduled_jobs;
@@ -267,6 +280,8 @@ for my $thread (@threads) {
   $thread->join;
 }
 
+
+CLEANUP:
 # Remove lockfile
 unlink $config{"lockfile"};
 
@@ -281,6 +296,15 @@ sub debug
 
   if ($debug_on) {
     print $message;
+  }
+}
+
+sub if_simulate
+{
+  my ($message) = @_;
+
+  if ($simulate_on) {
+    print "--> Simulate: " . $message . "\n";
   }
 }
 
