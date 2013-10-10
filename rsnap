@@ -81,7 +81,7 @@ for my $h (keys %hosts) {
     $scheduled_hosts{$h}{"rotate"} = $config{"rotate"};
   }
   if (defined $host->{"exclude"}) {
-    $scheduled_hosts{$h}{"exclude"} = $host->{"exclude"};
+    $scheduled_hosts{$h}{"exclude"} = $config{"exclude"}." ".$host->{"exclude"};
   } else {
     $scheduled_hosts{$h}{"exclude"} = $config{"exclude"};
   }
