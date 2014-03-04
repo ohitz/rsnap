@@ -80,10 +80,13 @@ for my $h (keys %hosts) {
   } else {
     $scheduled_hosts{$h}{"exclude"} = $config{"exclude"};
   }
+  if (!defined($host->{"snapshot_root"})) {
+    $host->{"snapshot_root"} = $config{"snapshot_root"};
+  }
   if (defined $host->{"group"}) {
-    $scheduled_hosts{$h}{"dir"} = $config{"snapshot_root"}."/".$host->{"group"}."/".$h;
+    $scheduled_hosts{$h}{"dir"} = $host->{"snapshot_root"}."/".$host->{"group"}."/".$h;
   } else {
-    $scheduled_hosts{$h}{"dir"} = $config{"snapshot_root"}."/".$h;
+    $scheduled_hosts{$h}{"dir"} = $host->{"snapshot_root"}."/".$h;
   }
 
   $scheduled_hosts{$h}{"initialized"} = undef;
