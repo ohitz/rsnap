@@ -1,10 +1,11 @@
 #!/usr/bin/perl
 #
-# Copyright (C) 2008-2013 Oliver Hitz <oliver@net-track.ch>
+# Copyright (C) 2008-2014 Oliver Hitz <oliver@net-track.ch>
 #
 use POSIX qw(strftime);
 use Digest::MD5 qw(md5_hex);
 use Getopt::Long;
+use File::Basename;
 use threads;
 use threads::shared;
 use strict;
@@ -386,7 +387,7 @@ sub backup_thread
     return;
   }
 
-  mkdir $tempdir;
+  mkdirp($tempdir);
 
   while (has_backup_jobs()) {
     my ($job) = next_backup_job();
@@ -469,7 +470,7 @@ sub store_last_duration
   my $lddir = $job->{"dir"}."/.rsnap";
 
   if (! -d $lddir) {
-    mkdir $lddir;
+    mkdirp($lddir);
   }
 
   my $hash = md5_hex($job->{"hostname"}.".".$job->{"filter"});
@@ -584,14 +585,9 @@ sub backup_initialize_host
 
   my $root = $host->{"dir"};
 
-  # Ensure the backup root directory exists.
-  if (! -d $root) {
-    mkdir $root;
-  }
-
   # Create a new working directory if it doesn't already exist.
   if (! -d $root."/".$config{"archive_name"}) {
-    mkdir $root."/".$config{"archive_name"};
+    mkdirp($root."/".$config{"archive_name"});
   }
 }
 
@@ -645,7 +641,7 @@ sub backup_finalize
 
     # Create the .delete directory
     if (! -d $root."/".$config{"archive_name"}.".delete") {
-      mkdir $root."/".$config{"archive_name"}.".delete";
+      mkdirp($root."/".$config{"archive_name"}.".delete");
     }
     
     # Get the list of all snapshot.YYYYMMDD directories.
@@ -753,4 +749,14 @@ sub backup
   unlink $tempdir."/filter" if -f $tempdir."/filter";
 
   return ($status, $files_total, $files_sent, $bytes_total, $bytes_sent);
+}
+
+# ----------------------------------------------------------------------------
+# mkdir -p
+#
+sub mkdirp($) {
+    my $dir = shift;
+    return if (-d $dir);
+    mkdirp(dirname($dir));
+    mkdir $dir;
 }
