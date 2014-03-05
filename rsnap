@@ -549,6 +549,7 @@ sub backup_finalize
 
       debug("Renaming working directory: ".$root."/".$config{"archive_name"}." -> ".$root."/".$config{"archive_name"}.".".$suffix."\n");
       rename $root."/".$config{"archive_name"}, $root."/".$config{"archive_name"}.".".$suffix;
+      rename $root."/".$config{"archive_name"}.".items", $root."/".$config{"archive_name"}.".".$suffix.".items";
 
       # Remove the "latest" symlink.
       if (-l $root."/".$config{"archive_name"}.".latest") {
@@ -586,6 +587,10 @@ sub backup_finalize
     foreach my $dir (@dirs) {
       debug("Renaming directory to delete: ".$root."/".$dir." -> ".$root."/".$config{"archive_name"}.".delete/".$dir."\n");
       rename $root."/".$dir, $root."/".$config{"archive_name"}.".delete/".$dir;
+      if (-f $root."/".$dir.".items") {
+	debug("Renaming .items file to delete: ".$root."/".$dir.".items -> ".$root."/".$config{"archive_name"}.".delete/".$dir.".items\n");
+	rename $root."/".$dir.".items", $root."/".$config{"archive_name"}.".delete/".$dir.".items";
+      }
     }
   }
 }
@@ -606,6 +611,7 @@ sub backup
   $rsync_command .= " --delete";
   $rsync_command .= " --numeric-ids";
   $rsync_command .= " --stats";
+  $rsync_command .= " --itemize-changes";
 
   # RSH
   $rsync_command .= " --rsh=\"".$config{"rsh_program"}."\"";
@@ -637,10 +643,14 @@ sub backup
   my $bytes_sent;
 
   # Execute command
-  open RSYNC, $rsync_command." 2>&1 |";
+  system($rsync_command." 2>&1 >".$root."/".$config{"archive_name"}.".items");
 
-  # Parse output
-  while (my $line = <RSYNC>) {
+  # Status code
+  my $status = $? >> 8;
+
+  # Parse the output.
+  open ITEMS, $root."/".$config{"archive_name"}.".items";
+  while (my $line = <ITEMS>) {
     if ($line =~ /^Number of files: (\d+)$/) {
       $files_total = $1;
     } elsif ($line =~ /^Number of files transferred: (\d+)$/) {
@@ -651,10 +661,7 @@ sub backup
       $bytes_sent = $1 / (1024*1024);
     }
   }
-  close RSYNC;
-
-  # Status code
-  my $status = $? >> 8;
+  close ITEMS;
 
   # Cleanup temporary files
   unlink $tempdir."/filter" if -f $tempdir."/filter";
