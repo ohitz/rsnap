@@ -651,13 +651,16 @@ sub backup
   # Parse the output.
   open ITEMS, $root."/".$config{"archive_name"}.".items";
   while (my $line = <ITEMS>) {
-    if ($line =~ /^Number of files: (\d+)$/) {
+    # Strip some characters.
+    $line =~ s/[,\.]//g;
+
+    if ($line =~ /^Number of files: (\d+)\D/) {
       $files_total = $1;
-    } elsif ($line =~ /^Number of files transferred: (\d+)$/) {
+    } elsif ($line =~ /^Number of files transferred: (\d+)\D/) {
       $files_sent = $1;
-    } elsif ($line =~ /^Total file size: (\d+) bytes$/) {
+    } elsif ($line =~ /^Total file size: (\d+)\D/) {
       $bytes_total = $1 / (1024*1024);
-    } elsif ($line =~ /^Total transferred file size: (\d+) bytes$/) {
+    } elsif ($line =~ /^Total transferred file size: (\d+)\D/) {
       $bytes_sent = $1 / (1024*1024);
     }
   }
