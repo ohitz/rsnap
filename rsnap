@@ -85,8 +85,10 @@ for my $h (keys %hosts) {
   }
   if (defined $host->{"group"}) {
     $scheduled_hosts{$h}{"dir"} = $host->{"snapshot_root"}."/".$host->{"group"}."/".$h;
+    $scheduled_hosts{$h}{"group"} = $host->{"group"};
   } else {
     $scheduled_hosts{$h}{"dir"} = $host->{"snapshot_root"}."/".$h;
+    $scheduled_hosts{$h}{"group"} = "";
   }
 
   $scheduled_hosts{$h}{"initialized"} = undef;
@@ -188,15 +190,60 @@ if ($report ne "") {
   $report .= "\n\n";
 }
 
-$report .= "                         Files             Size in GB\n";
-$report .= "Host                     Total    Sent     Total    Sent     Time\n";
-$report .= "------------------------ -------- -------- -------- -------- -----\n";
+my $group = {
+  "name" => "",
+  "hosts" => 0,
+  "files_total" => 0,
+  "files_sent" => 0,
+  "bytes_total" => 0,
+  "bytes_sent" => 0,
+  "duration" => 0
+};
+my $total = {
+  "files_total" => 0,
+  "files_sent" => 0,
+  "bytes_total" => 0,
+  "bytes_sent" => 0,
+  "duration" => 0
+};
 
-foreach my $h (sort keys %scheduled_hosts) {
+$report .= "                                     Files             Size in GB\n";
+$report .= "Host                                 Total    Sent     Total    Sent     Time\n";
+$report .= "------------------------------------ -------- -------- -------- -------- -----\n";
+
+foreach my $h (sort { my $o = $scheduled_hosts{$a}{"group"} cmp $scheduled_hosts{$b}{"group"}; if ($o != 0) { return $o; } else { return $a cmp $b; } } keys %scheduled_hosts) {
   my $host = $scheduled_hosts{$h};
-
+  
+  if ($host->{"group"} ne $group->{"name"}) {
+    if ($group->{"hosts"} > 0) {
+      # Print subtotal.
+      $report .= "------------------------------------ -------- -------- -------- -------- -----\n";
+      $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %2d:%02d\n",
+			 "Total ".$group->{"name"},
+			 $group->{"files_total"},
+			 $group->{"files_sent"},
+			 $group->{"bytes_total"} / 1024.0,
+			 $group->{"bytes_sent"} / 1024.0,
+			 ($group->{"duration"} / 60) / 60,
+			 ($group->{"duration"} / 60) % 60);
+      $report .= "\n";
+    }
+    
+    $group = {
+      "name" => $host->{"group"},
+      "hosts" => 0,
+      "files_total" => 0,
+      "files_sent" => 0,
+      "bytes_total" => 0,
+      "bytes_sent" => 0,
+      "duration" => 0
+    };
+  }
+  
+  $group->{"hosts"}++;
+  
   if ($host->{"errors"} == 0) {
-    $report .= sprintf("%-24.24s %8d %8d %8.2f %8.2f %2d:%02d\n",
+    $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %2d:%02d\n",
 		       $host->{"hostname"},
 		       $host->{"files_total"},
 		       $host->{"files_sent"},
@@ -204,8 +251,44 @@ foreach my $h (sort keys %scheduled_hosts) {
 		       $host->{"bytes_sent"} / 1024.0,
 		       ($host->{"duration"} / 60) / 60,
 		       ($host->{"duration"} / 60) % 60);
+    
+    $group->{"files_total"} += $host->{"files_total"};
+    $group->{"files_sent"} += $host->{"files_sent"};
+    $group->{"bytes_total"} += $host->{"bytes_total"};
+    $group->{"bytes_sent"} += $host->{"bytes_sent"};
+    $group->{"duration"} += $host->{"duration"};
+    
+    $total->{"files_total"} += $host->{"files_total"};
+    $total->{"files_sent"} += $host->{"files_sent"};
+    $total->{"bytes_total"} += $host->{"bytes_total"};
+    $total->{"bytes_sent"} += $host->{"bytes_sent"};
+    $total->{"duration"} += $host->{"duration"};
   }
 }
+
+# Print subtotal if in group.
+if ($group->{"name"} ne "") {
+  $report .= "------------------------------------ -------- -------- -------- -------- -----\n";
+  $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %2d:%02d\n",
+		     "Total ".$group->{"name"},
+		     $group->{"files_total"},
+		     $group->{"files_sent"},
+		     $group->{"bytes_total"} / 1024.0,
+		     $group->{"bytes_sent"} / 1024.0,
+		     ($group->{"duration"} / 60) / 60,
+		     ($group->{"duration"} / 60) % 60);
+}
+
+# Print grand total.
+$report .= "------------------------------------ -------- -------- -------- -------- -----\n";
+$report .= sprintf("%-36s %8d %8d %8.2f %8.2f %2d:%02d\n",
+		   "Total",
+		   $total->{"files_total"},
+		   $total->{"files_sent"},
+		   $total->{"bytes_total"} / 1024.0,
+		   $total->{"bytes_sent"} / 1024.0,
+		   ($total->{"duration"} / 60) / 60,
+		   ($total->{"duration"} / 60) % 60);
 
 # Send report by email if configured.
 if ($config{"email_to"} ne "") {
