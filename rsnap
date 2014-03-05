@@ -43,7 +43,9 @@ die "Failed to eval() file $configfile:\n$@\n" if ($@);
 
 # Check if already running.
 if (-f $config{"lockfile"}) {
-  exit 0;
+  printf STDERR ("Lock file '%s' exists, is rsnap already running?\n",
+		 $config{"lockfile"});
+  exit 1;
 }
 open LOCK, ">".$config{"lockfile"};
 close LOCK;
