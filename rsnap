@@ -12,9 +12,12 @@ use strict;
 
 my $debug_on;
 my $configfile = "/etc/rsnap.conf";
+my @groups;
 
-if (!GetOptions( "debug" => \$debug_on, "config=s" => \$configfile)) {
-  print "Usage: $0 --config=rsnap.conf --debug host1 .. hostN\n";
+if (!GetOptions( "debug" => \$debug_on,
+		 "config=s" => \$configfile,
+		 "group=s" => \@groups)) {
+  print "Usage: $0 [--config=rsnap.conf] [--debug] [--group=group] [host1 .. hostN]\n";
   exit 1;
 }
 
@@ -62,6 +65,21 @@ for my $h (keys %hosts) {
   # hash, we skip it.
   if (!defined $rsnap_hosts{"*"} && !defined $rsnap_hosts{$h}) {
     next;
+  }
+
+  # If we have groups selected, check if this host belongs to the
+  # right group.
+  if (0 != scalar @groups) {
+    my $skip = 1;
+    for my $group (@groups) {
+      if (defined($host->{"group"}) && ($host->{"group"} eq $group)) {
+	$skip = 0;
+	last;
+      }
+    }
+    if ($skip) {
+      next;
+    }
   }
 
   # Create the host structure.
