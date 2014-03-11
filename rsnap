@@ -3,7 +3,6 @@
 # Copyright (C) 2008-2014 Oliver Hitz <oliver@net-track.ch>
 #
 use POSIX qw(strftime);
-use Digest::MD5 qw(md5_hex);
 use Getopt::Long;
 use File::Basename;
 use threads;
@@ -138,19 +137,81 @@ for my $h (keys %hosts) {
 
   $scheduled_hosts{$h}{"jobs"} = 0;
 
-  # Create the jobs structure.
-  my $filters = undef;
-  if (defined $host->{"filters"}) {
-    $filters = $host->{"filters"};
-  } elsif (defined $config{"filters"}) {
-    $filters = $config{"filters"};
+  my $snapshot_dir = $scheduled_hosts{$h}{"dir"}."/".$config{"archive_name"}.".latest";
+
+  my @filters;
+
+  # If parallel_path is configured, define filters so that the
+  # contents of these path is backed up in parallel.
+  if ($host->{parallel_path} ne "") {
+    my $parallel_path = $host->{parallel_path};
+
+    # Strip trailing slash.
+    $parallel_path =~ s/\/$//;
+
+    my $parallel_dir = $snapshot_dir."/".$parallel_path;
+
+    my @subdirs;
+
+    if (-d $parallel_dir) {
+      opendir(DIR, $parallel_dir);
+      while (my $entry = readdir(DIR)) {
+	if ($entry eq "." || $entry eq "..") {
+	  next;
+	}
+	if (! -d $parallel_dir."/".$entry) {
+	  next;
+	}
+
+	push @subdirs, $entry;
+      }
+      closedir DIR;
+
+      # Create the filters.
+      foreach my $entry (@subdirs) {
+	my $filter = {
+	  "part" => "part-$entry",
+	  "expr" => ""
+	};
+
+	foreach my $dirpart (dirparts($parallel_path)) {
+	  $filter->{expr} .= "+ $dirpart/\n";
+	}
+
+	$filter->{expr} .= "+ $parallel_path/$entry/\n";
+
+	foreach my $e (@subdirs) {
+	  if ($entry ne $e) {
+	    $filter->{expr} .= "- $parallel_path/$e/\n";
+	  }
+	}
+
+	foreach my $dirpart (reverse dirparts($parallel_path)) {
+	  $filter->{expr} .= "- $dirpart/*\n";
+	}
+	$filter->{expr} .= "- /*\n";
+
+	push @filters, $filter;
+      }
+
+      # Create filter taking care of the rest.
+      my $filter = {
+	"part" => "rest",
+	"expr" => ""
+      };
+      foreach my $entry (@subdirs) {
+	$filter->{expr} .= "- $parallel_path/$entry/\n";
+      }
+      push @filters, $filter;
+    }
   }
 
-  if (!$filters) {
+  if (0 == scalar @filters) {
     # Only one job, backup the entire host.
     my $j = $#scheduled_jobs+1;
     $scheduled_jobs[$j] = &share({});
     $scheduled_jobs[$j]{"hostname"} = $h;
+    $scheduled_jobs[$j]{"part"} = "full";
     $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
     $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
     $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
@@ -160,18 +221,19 @@ for my $h (keys %hosts) {
     debug("Scheduling job for host $h\n");
   } else {
     # Iterate through the filters.
-    foreach my $f (@{ $filters }) {
+    foreach my $f (@filters) {
       my $j = $#scheduled_jobs+1;
       $scheduled_jobs[$j] = &share({});
       $scheduled_jobs[$j]{"hostname"} = $h;
+      $scheduled_jobs[$j]{"part"} = $f->{part};
       $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
-      $scheduled_jobs[$j]{"filter"} = $f;
+      $scheduled_jobs[$j]{"filter"} = $f->{expr};
       $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
       $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
 
       $scheduled_hosts{$h}{"jobs"}++;
 
-      debug("Scheduling job for host $h\n");
+      debug("Scheduling job for host $h (".$f->{part}.")\n");
     }
   }
 }
@@ -483,10 +545,8 @@ sub get_last_duration
     return 0;
   }
 
-  my $hash = md5_hex($job->{"hostname"}.".".$job->{"filter"});
-
   # Try to open the last_duration file
-  open LD, $lddir."/".$hash or return 0;
+  open LD, $lddir."/".$job->{"part"} or return 0;
   my $last_duration = int <LD>;
   close LD;
 
@@ -502,14 +562,10 @@ sub store_last_duration
 
   my $lddir = $job->{"dir"}."/.rsnap";
 
-  if (! -d $lddir) {
-    mkdirp($lddir);
-  }
-
-  my $hash = md5_hex($job->{"hostname"}.".".$job->{"filter"});
+  mkdirp($lddir);
 
   # Create the last_duration file.
-  open LD, ">".$lddir."/".$hash or return 0;
+  open LD, ">".$lddir."/".$job->{"part"} or return 0;
   print LD $job->{"last_duration"};
   close LD;
 }
@@ -597,7 +653,7 @@ sub backup_job_done
     $host->{"errors"}++;
     if (defined $job->{"filter"}) {
       $host->{"error_messages"} .= " exit status ".$status."\n";
-      $host->{"error_messages"} .= " filter: ".$job->{"filter"}."\n";
+      $host->{"error_messages"} .= " part: ".$job->{"part"}."\n";
     } else {
       $host->{"error_messages"} .= " exit status ".$status."\n";
     }
@@ -618,10 +674,9 @@ sub backup_initialize_host
 
   my $root = $host->{"dir"};
 
-  # Create a new working directory if it doesn't already exist.
-  if (! -d $root."/".$config{"archive_name"}) {
-    mkdirp($root."/".$config{"archive_name"});
-  }
+  # Create new working directories.
+  mkdirp($root."/".$config{"archive_name"});
+  mkdirp($root."/".$config{"archive_name"}.".items");
 }
 
 # ----------------------------------------------------------------------------
@@ -667,9 +722,13 @@ sub backup_finalize
       if (-l $root."/".$config{"archive_name"}.".latest") {
 	unlink $root."/".$config{"archive_name"}.".latest";
       }
+      if (-l $root."/".$config{"archive_name"}.".items.latest") {
+	unlink $root."/".$config{"archive_name"}.".items.latest";
+      }
 
       # Create new "latest" symlink.
       `ln -s $config{"archive_name"}.$suffix $root/$config{"archive_name"}.latest`;
+      `ln -s $config{"archive_name"}.$suffix.items $root/$config{"archive_name"}.items.latest`;
     }
 
     # Create the .delete directory
@@ -699,7 +758,7 @@ sub backup_finalize
     foreach my $dir (@dirs) {
       debug("Renaming directory to delete: ".$root."/".$dir." -> ".$root."/".$config{"archive_name"}.".delete/".$dir."\n");
       rename $root."/".$dir, $root."/".$config{"archive_name"}.".delete/".$dir;
-      if (-f $root."/".$dir.".items") {
+      if (-d $root."/".$dir.".items") {
 	debug("Renaming .items file to delete: ".$root."/".$dir.".items -> ".$root."/".$config{"archive_name"}.".delete/".$dir.".items\n");
 	rename $root."/".$dir.".items", $root."/".$config{"archive_name"}.".delete/".$dir.".items";
       }
@@ -754,14 +813,23 @@ sub backup
   my $bytes_total;
   my $bytes_sent;
 
+  my $info_file = $root."/".$config{"archive_name"}.".items/".$job->{"part"}.".txt";
+
+  # Print filter to .items file.
+  open INFO, ">$info_file";
+  print INFO "Filter:\n";
+  print INFO $job->{filter};
+  print INFO "\n";
+  close INFO;
+
   # Execute command
-  system($rsync_command." 2>&1 >".$root."/".$config{"archive_name"}.".items");
+  system($rsync_command." 2>&1 >>$info_file");
 
   # Status code
   my $status = $? >> 8;
 
   # Parse the output.
-  open ITEMS, $root."/".$config{"archive_name"}.".items";
+  open ITEMS, $info_file;
   while (my $line = <ITEMS>) {
     # Strip some characters.
     $line =~ s/[,\.]//g;
@@ -792,6 +860,20 @@ sub mkdirp($) {
   return if (-d $dir);
   mkdirp(dirname($dir));
   mkdir $dir;
+}
+
+# ----------------------------------------------------------------------------
+# dirparts
+#
+sub dirparts() {
+  my $dir = shift;
+  if ($dir eq dirname $dir) {
+    return ();
+  } else {
+    my @result = dirparts(dirname $dir);
+    push @result, $dir;
+    return @result;
+  }
 }
 
 # ----------------------------------------------------------------------------
