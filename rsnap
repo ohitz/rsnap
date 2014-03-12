@@ -54,7 +54,7 @@ set_default(\%config, "archive_name", "snapshot");
 set_default(\%config, "temp_dir", "/tmp/");
 set_default(\%config, "rsh_program", "ssh -c arcfour -o StrictHostKeyChecking=no");
 set_default(\%config, "rsync_program", "/usr/bin/rsync");
-set_default(\%config, "rsync_options", "--whole-file");
+set_default(\%config, "rsync_options", "");
 set_default(\%config, "progress_file", "/var/run/rsnap.progress");
 
 # Check if already running.
@@ -123,6 +123,11 @@ for my $h (keys %hosts) {
   } else {
     $scheduled_hosts{$h}{"dir"} = $host->{"snapshot_root"}."/".$h;
     $scheduled_hosts{$h}{"group"} = "";
+  }
+  if (defined $host->{rsync_options}) {
+    $scheduled_hosts{$h}{rsync_options} = $host->{rsync_options};
+  } else {
+    $scheduled_hosts{$h}{rsync_options} = $config{rsync_options};
   }
 
   $scheduled_hosts{$h}{"initialized"} = undef;
@@ -836,7 +841,9 @@ sub backup
 
   my $root = $job->{"dir"};
 
-  my $rsync_command = $config{"rsync_program"}." ".$config{"rsync_options"};
+  my $host = $scheduled_hosts{$job->{"hostname"}};
+
+  my $rsync_command = $config{"rsync_program"}." ".$host->{rsync_options};
 
   # General options
   $rsync_command .= " --archive";
