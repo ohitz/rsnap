@@ -485,11 +485,11 @@ sub debug
 #
 sub backup_thread
 {
-  my ($number) = @_;
-  debug("Backup thread $number: started.\n");
+  my ($thread_number) = @_;
+  debug("Backup thread $thread_number: started.\n");
 
   # Initialize thread environment
-  my $tempdir = $config{"temp_dir"}."/rsnap.".$$.".".$number;
+  my $tempdir = $config{"temp_dir"}."/rsnap.".$$.".".$thread_number;
 
   # Ensure the temporary directory doesn't exist
   if (-d $tempdir) {
@@ -502,30 +502,35 @@ sub backup_thread
     my ($job) = next_backup_job();
     if ($job) {
       my $start = time();
-      debug("Backup thread $number: got job ".$job->{"hostname"}."\n");
+      debug("Backup thread $thread_number: got job ".$job->{"hostname"}."\n");
 
-      $progress{"thr_state_".$number} =
-	  sprintf("%s (%s), last duration: %s",
+      $progress{"thr_state_".$thread_number} =
+	  sprintf("%s (%s)",
 		  $job->{hostname},
-		  $job->{part},
-		  ($job->{last_duration} == 0) ? "?" : format_duration($job->{last_duration}));
+		  $job->{part});
+      $progress{"thr_start_".$thread_number} = $start;
+      $progress{"thr_last_".$thread_number} = $job->{last_duration};
+
+      update_progress();
 
       my ($status, $files_total, $files_sent, $bytes_total, $bytes_sent) = backup($job, $tempdir);
 
       my $duration = time() - $start;
-      debug("Backup thread $number: finished job in $duration seconds.\n");
+      debug("Backup thread $thread_number: finished job in $duration seconds.\n");
       backup_job_done($job, $duration, $status, $files_total, $files_sent, $bytes_total, $bytes_sent);
-      $progress{"thr_state_".$number} = "<idle>";
+      $progress{"thr_state_".$thread_number} = "<idle>";
+      $progress{"thr_start_".$thread_number} = 0;
     } else {
-      # Wait a couple of seconds before retrying.
-      debug("Backup thread $number: idle.\n");
-      sleep(2);
+      debug("Backup thread $thread_number: idle.\n");
+      last;
     }
   }
 
-  rmdir $tempdir;
+  $progress{"thr_state_".$thread_number} = "<finished>";
 
-  debug("Backup thread $number: ended.\n");
+  rmdir $tempdir;
+  
+  debug("Backup thread $thread_number: ended.\n");
 }
 
 # ----------------------------------------------------------------------------
@@ -633,10 +638,22 @@ sub update_progress
     printf PROGRESS "\nThreads::\n";
 
     for (my $i = 0; $i < $config{threads}; $i++) {
+      my $time = "";
+      my $start = $progress{"thr_start_".$i};
+      my $last = $progress{"thr_last_".$i};
+
+      if ($start > 0) {
+	$time = sprintf(" since %s", format_duration(time() - $start));
+	if ($last != 0) {
+	  $time .= sprintf(" (last: %s)", format_duration($last));
+	}
+      }
+
       printf PROGRESS
-	  "%d: %s\n",
+	  "%d: %s%s\n",
 	  $i,
-	  $progress{"thr_state_".$i};
+	  $progress{"thr_state_".$i},
+	  $time;
     }
 
     close PROGRESS;
