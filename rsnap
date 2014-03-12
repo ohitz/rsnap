@@ -55,6 +55,7 @@ set_default(\%config, "temp_dir", "/tmp/");
 set_default(\%config, "rsh_program", "ssh -c arcfour -o StrictHostKeyChecking=no");
 set_default(\%config, "rsync_program", "/usr/bin/rsync");
 set_default(\%config, "rsync_options", "--whole-file");
+set_default(\%config, "progress_file", "/var/run/rsnap.progress");
 
 # Check if already running.
 if (-f $config{"lockfile"}) {
@@ -240,6 +241,18 @@ for my $h (keys %hosts) {
 
 # Sort the jobs by duration (longest job first).
 @scheduled_jobs = sort { $b->{"last_duration"} <=> $a->{"last_duration"} } @scheduled_jobs;
+
+# Prepare progress structure.
+my %progress : shared;
+
+$progress{hosts_total} = scalar values %scheduled_hosts;
+$progress{hosts_done} = 0;
+$progress{jobs_total} = scalar @scheduled_jobs;
+$progress{jobs_done} = 0;
+
+for (my $i = 0; $i < $config{threads}; $i++) {
+  $progress{"thr_state_".$i} = "<idle>";
+}
 
 # Start the backup threads
 my $rsnap_lock : shared;
@@ -486,11 +499,18 @@ sub backup_thread
       my $start = time();
       debug("Backup thread $number: got job ".$job->{"hostname"}."\n");
 
+      $progress{"thr_state_".$number} =
+	  sprintf("%s (%s), last duration: %s",
+		  $job->{hostname},
+		  $job->{part},
+		  ($job->{last_duration} == 0) ? "?" : format_duration($job->{last_duration}));
+
       my ($status, $files_total, $files_sent, $bytes_total, $bytes_sent) = backup($job, $tempdir);
 
       my $duration = time() - $start;
       debug("Backup thread $number: finished job in $duration seconds.\n");
       backup_job_done($job, $duration, $status, $files_total, $files_sent, $bytes_total, $bytes_sent);
+      $progress{"thr_state_".$number} = "<idle>";
     } else {
       # Wait a couple of seconds before retrying.
       debug("Backup thread $number: idle.\n");
@@ -590,6 +610,35 @@ sub has_backup_jobs
 }
 
 # ----------------------------------------------------------------------------
+# Update the progress file.
+#
+sub update_progress
+{
+  if ($config{"progress_file"} ne "") {
+    open PROGRESS, ">".$config{"progress_file"} or return;
+    printf PROGRESS
+	"Hosts: %d/%d\n",
+	$progress{hosts_done},
+	$progress{hosts_total};
+    printf PROGRESS
+	"Jobs: %d/%d\n",
+	$progress{jobs_done},
+	$progress{jobs_total};
+
+    printf PROGRESS "\nThreads::\n";
+
+    for (my $i = 0; $i < $config{threads}; $i++) {
+      printf PROGRESS
+	  "%d: %s\n",
+	  $i,
+	  $progress{"thr_state_".$i};
+    }
+
+    close PROGRESS;
+  }
+}
+
+# ----------------------------------------------------------------------------
 # Returns the next backup job.
 #
 sub next_backup_job
@@ -619,6 +668,8 @@ sub next_backup_job
 	$host->{"initialized"} = 1;
       }
 
+      update_progress();
+
       return $job;
     }
   }
@@ -644,6 +695,10 @@ sub backup_job_done
   $host->{"bytes_total"} += $bytes_total;
   $host->{"bytes_sent"} += $bytes_sent;
   $host->{"duration"} += $duration;
+  $host->{"jobs_done"}++;
+  if ($host->{jobs_done} == $host->{jobs}) {
+    $progress{hosts_done}++;
+  }
 
   if ($status != 0 && $status != 23 && $status != 24) {
     $host->{"errors"}++;
@@ -666,6 +721,9 @@ sub backup_job_done
 
   # Push the finished job into the "finished_jobs" queue.
   push @finished_jobs, $job;
+  $progress{jobs_done}++;
+
+  update_progress();
 }
 
 # ----------------------------------------------------------------------------
