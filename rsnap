@@ -650,7 +650,7 @@ sub next_backup_job
     my $host = $scheduled_hosts{$job->{"hostname"}};
 
     # Check if the host in question still has capacity for this job.
-    if ($host->{"in_progress"} < $host->{"host_parallel"}) {
+    if ($host->{"in_progress"} <= $host->{"host_parallel"}) {
       # Yes, there is enough capacity
 
       # Remove the job from the list of jobs.
