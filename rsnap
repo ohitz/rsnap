@@ -314,14 +314,13 @@ foreach my $h (sort { my $o = $scheduled_hosts{$a}{"group"} cmp $scheduled_hosts
     if ($group->{"hosts"} > 0) {
       # Print subtotal.
       $report .= "------------------------------------ -------- -------- -------- -------- -----\n";
-      $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %2d:%02d\n",
+      $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %5s\n",
 			 "Total ".$group->{"name"},
 			 $group->{"files_total"},
 			 $group->{"files_sent"},
 			 $group->{"bytes_total"} / 1024.0,
 			 $group->{"bytes_sent"} / 1024.0,
-			 ($group->{"duration"} / 60) / 60,
-			 ($group->{"duration"} / 60) % 60);
+			 format_duration($group->{duration}));
       $report .= "\n";
     }
     
@@ -339,14 +338,13 @@ foreach my $h (sort { my $o = $scheduled_hosts{$a}{"group"} cmp $scheduled_hosts
   $group->{"hosts"}++;
   
   if ($host->{"errors"} == 0) {
-    $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %2d:%02d\n",
+    $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %5s\n",
 		       $host->{"hostname"},
 		       $host->{"files_total"},
 		       $host->{"files_sent"},
 		       $host->{"bytes_total"} / 1024.0,
 		       $host->{"bytes_sent"} / 1024.0,
-		       ($host->{"duration"} / 60) / 60,
-		       ($host->{"duration"} / 60) % 60);
+                       format_duration($host->{duration}));
     
     $group->{"files_total"} += $host->{"files_total"};
     $group->{"files_sent"} += $host->{"files_sent"};
@@ -365,26 +363,24 @@ foreach my $h (sort { my $o = $scheduled_hosts{$a}{"group"} cmp $scheduled_hosts
 # Print subtotal if in group.
 if ($group->{"name"} ne "") {
   $report .= "------------------------------------ -------- -------- -------- -------- -----\n";
-  $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %2d:%02d\n",
+  $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %5s\n",
 		     "Total ".$group->{"name"},
 		     $group->{"files_total"},
 		     $group->{"files_sent"},
 		     $group->{"bytes_total"} / 1024.0,
 		     $group->{"bytes_sent"} / 1024.0,
-		     ($group->{"duration"} / 60) / 60,
-		     ($group->{"duration"} / 60) % 60);
+                     format_duration($group->{duration}));
 }
 
 # Print grand total.
 $report .= "------------------------------------ -------- -------- -------- -------- -----\n";
-$report .= sprintf("%-36s %8d %8d %8.2f %8.2f %2d:%02d\n",
+$report .= sprintf("%-36s %8d %8d %8.2f %8.2f %5s\n",
 		   "Total",
 		   $total->{"files_total"},
 		   $total->{"files_sent"},
 		   $total->{"bytes_total"} / 1024.0,
 		   $total->{"bytes_sent"} / 1024.0,
-		   ($total->{"duration"} / 60) / 60,
-		   ($total->{"duration"} / 60) % 60);
+                   format_duration($total->{duration}));
 
 # Send report by email if configured.
 if ($config{"email_to"} ne "") {
@@ -659,6 +655,13 @@ sub backup_job_done
     }
   }
 
+  printf
+      "%s (%s) done: status=%d, duration=%s\n",
+      $job->{hostname},
+      $job->{part},
+      $status,
+      format_duration($duration);
+
   store_last_duration($job);
 
   # Push the finished job into the "finished_jobs" queue.
@@ -850,6 +853,15 @@ sub backup
   unlink $tempdir."/filter" if -f $tempdir."/filter";
 
   return ($status, $files_total, $files_sent, $bytes_total, $bytes_sent);
+}
+
+# ----------------------------------------------------------------------------
+# format_duration
+#
+sub format_duration() {
+  my $duration = shift;
+  my $minutes = $duration / 60;
+  return sprintf("%d:%02d", $minutes / 60, $minutes % 60);
 }
 
 # ----------------------------------------------------------------------------
