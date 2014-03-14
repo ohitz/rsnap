@@ -58,12 +58,12 @@ set_default(\%config, "rsync_options", "");
 set_default(\%config, "progress_file", "/var/run/rsnap.progress");
 
 # Check if already running.
-if (-f $config{"lockfile"}) {
+if (-f $config{lockfile}) {
   printf STDERR ("Lock file '%s' exists, is rsnap already running?\n",
-		 $config{"lockfile"});
+		 $config{lockfile});
   exit 1;
 }
-open LOCK, ">".$config{"lockfile"};
+open LOCK, ">".$config{lockfile};
 close LOCK;
 
 # Create the backup hosts and jobs structure.
@@ -466,6 +466,10 @@ for my $thread (@threads) {
 # Remove lockfile
 unlink $config{"lockfile"};
 
+if ($config{progress_file} ne "") {
+  unlink($config{progress_file});
+}
+
 exit 0;
 
 # ----------------------------------------------------------------------------
@@ -520,6 +524,7 @@ sub backup_thread
       backup_job_done($job, $duration, $status, $files_total, $files_sent, $bytes_total, $bytes_sent);
       $progress{"thr_state_".$thread_number} = "<idle>";
       $progress{"thr_start_".$thread_number} = 0;
+      update_progress();
     } else {
       debug("Backup thread $thread_number: idle.\n");
       last;
@@ -529,6 +534,8 @@ sub backup_thread
   $progress{"thr_state_".$thread_number} = "<finished>";
 
   rmdir $tempdir;
+
+  update_progress();
   
   debug("Backup thread $thread_number: ended.\n");
 }
@@ -624,8 +631,8 @@ sub has_backup_jobs
 #
 sub update_progress
 {
-  if ($config{"progress_file"} ne "") {
-    open PROGRESS, ">".$config{"progress_file"} or return;
+  if ($config{progress_file} ne "") {
+    open PROGRESS, ">".$config{progress_file} or return;
     printf PROGRESS
 	"Hosts: %d/%d\n",
 	$progress{hosts_done},
