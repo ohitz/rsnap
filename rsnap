@@ -20,6 +20,8 @@ if (!GetOptions( "debug" => \$debug_on,
   exit 1;
 }
 
+my $started = time();
+
 # The remaining options are host names. We take note of them using the
 # hash rsnap_hosts.
 my %rsnap_hosts;
@@ -259,8 +261,12 @@ for (my $i = 0; $i < $config{threads}; $i++) {
   $progress{"thr_state_".$i} = "<idle>";
 }
 
-# Start the backup threads
 my $rsnap_lock : shared;
+
+# Start the progress thread
+my $progress_threads = threads->create("progress_thread");
+
+# Start the backup threads
 my @threads = ();
 
 for (my $i = 0; $i < $config{"threads"}; $i++) {
@@ -321,9 +327,9 @@ my $total = {
   "duration" => 0
 };
 
-$report .= "                                     Files             Size in GB\n";
-$report .= "Host                                 Total    Sent     Total    Sent     Time\n";
-$report .= "------------------------------------ -------- -------- -------- -------- -----\n";
+$report .= "                                  Files             Size in GB\n";
+$report .= "Host                              Total    Sent     Total    Sent     Time\n";
+$report .= "--------------------------------- -------- -------- -------- -------- --------\n";
 
 foreach my $h (sort { my $o = $scheduled_hosts{$a}{"group"} cmp $scheduled_hosts{$b}{"group"}; if ($o != 0) { return $o; } else { return $a cmp $b; } } keys %scheduled_hosts) {
   my $host = $scheduled_hosts{$h};
@@ -331,8 +337,8 @@ foreach my $h (sort { my $o = $scheduled_hosts{$a}{"group"} cmp $scheduled_hosts
   if ($host->{"group"} ne $group->{"name"}) {
     if ($group->{"hosts"} > 0) {
       # Print subtotal.
-      $report .= "------------------------------------ -------- -------- -------- -------- -----\n";
-      $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %5s\n",
+      $report .= "--------------------------------- -------- -------- -------- -------- --------\n";
+      $report .= sprintf("%-33s %8d %8d %8.2f %8.2f %8s\n",
 			 "Total ".$group->{"name"},
 			 $group->{"files_total"},
 			 $group->{"files_sent"},
@@ -356,7 +362,7 @@ foreach my $h (sort { my $o = $scheduled_hosts{$a}{"group"} cmp $scheduled_hosts
   $group->{"hosts"}++;
   
   if ($host->{"errors"} == 0) {
-    $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %5s\n",
+    $report .= sprintf("%-33s %8d %8d %8.2f %8.2f %8s\n",
 		       $host->{"hostname"},
 		       $host->{"files_total"},
 		       $host->{"files_sent"},
@@ -380,8 +386,8 @@ foreach my $h (sort { my $o = $scheduled_hosts{$a}{"group"} cmp $scheduled_hosts
 
 # Print subtotal if in group.
 if ($group->{"name"} ne "") {
-  $report .= "------------------------------------ -------- -------- -------- -------- -----\n";
-  $report .= sprintf("%-36s %8d %8d %8.2f %8.2f %5s\n",
+  $report .= "--------------------------------- -------- -------- -------- -------- --------\n";
+  $report .= sprintf("%-33s %8d %8d %8.2f %8.2f %8s\n",
 		     "Total ".$group->{"name"},
 		     $group->{"files_total"},
 		     $group->{"files_sent"},
@@ -391,8 +397,8 @@ if ($group->{"name"} ne "") {
 }
 
 # Print grand total.
-$report .= "------------------------------------ -------- -------- -------- -------- -----\n";
-$report .= sprintf("%-36s %8d %8d %8.2f %8.2f %5s\n",
+$report .= "--------------------------------- -------- -------- -------- -------- --------\n";
+$report .= sprintf("%-33s %8d %8d %8.2f %8.2f %8s\n",
 		   "Total",
 		   $total->{"files_total"},
 		   $total->{"files_sent"},
@@ -463,6 +469,10 @@ for my $thread (@threads) {
   $thread->join;
 }
 
+# Wait for the progress_thread to finish.
+$progress{quit} = 1;
+$progress_threads->join();
+
 # Remove lockfile
 unlink $config{"lockfile"};
 
@@ -481,6 +491,21 @@ sub debug
 
   if ($debug_on) {
     print $message;
+  }
+}
+
+# ----------------------------------------------------------------------------
+# The progress thread.
+#
+sub progress_thread
+{
+  while (!$progress{quit}) {
+    sleep(1);
+
+    {
+      lock($rsnap_lock);
+      update_progress();
+    }
   }
 }
 
@@ -515,8 +540,6 @@ sub backup_thread
       $progress{"thr_start_".$thread_number} = $start;
       $progress{"thr_last_".$thread_number} = $job->{last_duration};
 
-      update_progress();
-
       my ($status, $files_total, $files_sent, $bytes_total, $bytes_sent) = backup($job, $tempdir);
 
       my $duration = time() - $start;
@@ -524,7 +547,6 @@ sub backup_thread
       backup_job_done($job, $duration, $status, $files_total, $files_sent, $bytes_total, $bytes_sent);
       $progress{"thr_state_".$thread_number} = "<idle>";
       $progress{"thr_start_".$thread_number} = 0;
-      update_progress();
     } else {
       debug("Backup thread $thread_number: idle.\n");
       last;
@@ -535,8 +557,6 @@ sub backup_thread
 
   rmdir $tempdir;
 
-  update_progress();
-  
   debug("Backup thread $thread_number: ended.\n");
 }
 
@@ -632,7 +652,15 @@ sub has_backup_jobs
 sub update_progress
 {
   if ($config{progress_file} ne "") {
+    my $now = time();
+
     open PROGRESS, ">".$config{progress_file} or return;
+
+    printf PROGRESS
+	"Started: %s, %s ago.\n\n",
+	strftime("%Y%m%d %H:%M:%S", localtime($started)),
+	format_duration($now - $started);
+
     printf PROGRESS
 	"Hosts: %d/%d\n",
 	$progress{hosts_done},
@@ -650,7 +678,7 @@ sub update_progress
       my $last = $progress{"thr_last_".$i};
 
       if ($start > 0) {
-	$time = sprintf(" since %s", format_duration(time() - $start));
+	$time = sprintf(" since %s", format_duration($now - $start));
 	if ($last != 0) {
 	  $time .= sprintf(" (last: %s)", format_duration($last));
 	}
@@ -696,8 +724,6 @@ sub next_backup_job
 	backup_initialize_host($host);
 	$host->{"initialized"} = 1;
       }
-
-      update_progress();
 
       return $job;
     }
@@ -751,8 +777,6 @@ sub backup_job_done
   # Push the finished job into the "finished_jobs" queue.
   push @finished_jobs, $job;
   $progress{jobs_done}++;
-
-  update_progress();
 }
 
 # ----------------------------------------------------------------------------
@@ -950,7 +974,7 @@ sub backup
 sub format_duration() {
   my $duration = shift;
   my $minutes = $duration / 60;
-  return sprintf("%d:%02d", $minutes / 60, $minutes % 60);
+  return sprintf("%d:%02d:%02d", $minutes / 60, $minutes % 60, $duration % 60);
 }
 
 # ----------------------------------------------------------------------------
