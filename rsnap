@@ -407,14 +407,11 @@ $report .= sprintf("%-33s %8d %8d %8.2f %8.2f %8s\n",
                    format_duration($total->{duration}));
 
 # Send report by email if configured.
-if ($config{"email_to"} ne "") {
-  open MAIL,"|".$config{"sendmail_program"}." ".$config{"email_to"};
-  print MAIL "From: ".$config{"email_from"}."\n";
-  print MAIL "To: ".$config{"email_to"}."\n";
-  print MAIL "Subject: ".$config{"email_subject"}."\n";
-  print MAIL "\n";
-  print MAIL $report;
-  close MAIL;
+if ($config{email_to} ne "") {
+  send_email($config{email_from},
+             $config{email_to},
+             $config{email_subject},
+             $report);
 }
   
 debug($report);
@@ -452,14 +449,11 @@ if (defined $rsnap_hosts{"*"}) {
     close AFTERBACKUP;
 
     # Send report by email if configured.
-    if ($config{"after_backup_email_to"} ne "") {
-      open MAIL,"|".$config{"sendmail_program"}." ".$config{"after_backup_email_to"};
-      print MAIL "From: ".$config{"email_from"}."\n";
-      print MAIL "To: ".$config{"after_backup_email_to"}."\n";
-      print MAIL "Subject: ".$config{"after_backup_email_subject"}."\n";
-      print MAIL "\n";
-      print MAIL $report;
-      close MAIL;
+    if ($config{after_backup_email_to} ne "") {
+      send_email($config{after_backup_email_from},
+                 $config{after_backup_email_to},
+                 $config{after_backup_email_subject},
+                 $report);
     }
   }
 }
@@ -1012,4 +1006,20 @@ sub set_default()
   if (!defined $arr->{$var}) {
     $arr->{$var} = $value;
   }
+}
+
+# ----------------------------------------------------------------------------
+# Send email.
+#
+sub send_email
+{
+  my ($from, $to, $subject, $message) = @_;
+
+  open MAIL,"|".$config{"sendmail_program"}." ".$to;
+  print MAIL "From: ".$from."\n";
+  print MAIL "To: ".$to."\n";
+  print MAIL "Subject: ".$subject."\n";
+  print MAIL "\n";
+  print MAIL $message;
+  close MAIL;
 }
