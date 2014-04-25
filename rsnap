@@ -883,7 +883,7 @@ sub backup_finalize
 
     opendir(DIR, $root);
     while (my $dir = readdir(DIR)) {
-      if (-d $root."/".$dir && $dir =~ /^$config{"archive_name"}\.(\d*)$/) {
+      if (-d $root."/".$dir && $dir =~ /^$config{"archive_name"}\.\d+\.\d+$/) {
 	push @dirs, $dir;
       }
     }
