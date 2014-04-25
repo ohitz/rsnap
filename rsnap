@@ -10,13 +10,15 @@ use threads::shared;
 use strict;
 
 my $debug_on;
+my $force_on;
 my $configfile = "/etc/rsnap.conf";
 my @groups;
 
 if (!GetOptions( "debug" => \$debug_on,
+		 "force" => \$force_on,
 		 "config=s" => \$configfile,
 		 "group=s" => \@groups)) {
-  print "Usage: $0 [--config=rsnap.conf] [--debug] [--group=group] [host1 .. hostN]\n";
+  print "Usage: $0 [--config=rsnap.conf] [--debug] [--force] [--group=group] [host1 .. hostN]\n";
   exit 1;
 }
 
@@ -59,14 +61,22 @@ set_default(\%config, "rsync_program", "/usr/bin/rsync");
 set_default(\%config, "rsync_options", "");
 set_default(\%config, "progress_file", "/var/run/rsnap.progress");
 
-# Check if already running.
-if (-f $config{lockfile}) {
-  printf STDERR ("Lock file '%s' exists, is rsnap already running?\n",
-		 $config{lockfile});
-  exit 1;
+# If forcing, don't create a progress file, we don't want to overwrite
+# the file of another rsnap process.
+if ($force_on) {
+  $config{progress_file} = "";
 }
-open LOCK, ">".$config{lockfile};
-close LOCK;
+
+# Check if already running.
+if (!$force_on) {
+  if (-f $config{lockfile}) {
+    printf STDERR ("Lock file '%s' exists, is rsnap already running?\n",
+		   $config{lockfile});
+    exit 1;
+  }
+  open LOCK, ">".$config{lockfile};
+  close LOCK;
+}
 
 # Create the backup hosts and jobs structure.
 my %scheduled_hosts : shared;
@@ -489,8 +499,10 @@ if (defined $rsnap_hosts{"*"}) {
 $progress{quit} = 1;
 $progress_threads->join();
 
-# Remove lockfile
-unlink $config{"lockfile"};
+if (!$force_on) {
+  # Remove lockfile
+  unlink $config{"lockfile"};
+}
 
 if ($config{progress_file} ne "") {
   unlink($config{progress_file});
