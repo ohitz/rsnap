@@ -442,11 +442,11 @@ if (defined $rsnap_hosts{"*"}) {
   if (defined $config{"after_backup_script"}) {
     $report = "";
 
-    open AFTERBACKUP, $config{"after_backup_script"}." 2>&1 |";
-    while (my $line = <AFTERBACKUP>) {
+    open SCRIPT, $config{"after_backup_script"}." 2>&1 |";
+    while (my $line = <SCRIPT>) {
       $report .= $line;
     }
-    close AFTERBACKUP;
+    close SCRIPT;
 
     # Send report by email if configured.
     if ($config{after_backup_email_to} ne "") {
@@ -461,6 +461,28 @@ if (defined $rsnap_hosts{"*"}) {
 # Now, wait for the cleanup threads to finish.
 for my $thread (@threads) {
   $thread->join;
+}
+
+# If we were backing up all hosts, and if an after_cleanup_script is
+# defined, run it now after the cleanup threads have finished.
+if (defined $rsnap_hosts{"*"}) {
+  if (defined $config{"after_cleanup_script"}) {
+    $report = "";
+
+    open SCRIPT, $config{"after_cleanup_script"}." 2>&1 |";
+    while (my $line = <SCRIPT>) {
+      $report .= $line;
+    }
+    close SCRIPT;
+
+    # Send report by email if configured.
+    if ($config{after_cleanup_email_to} ne "") {
+      send_email($config{after_cleanup_email_from},
+                 $config{after_cleanup_email_to},
+                 $config{after_cleanup_email_subject},
+                 $report);
+    }
+  }
 }
 
 # Wait for the progress_thread to finish.
