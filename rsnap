@@ -9,16 +9,18 @@ use threads;
 use threads::shared;
 use strict;
 
+my $all_on;
 my $debug_on;
 my $force_on;
 my $configfile = "/etc/rsnap.conf";
 my @groups;
 
-if (!GetOptions( "debug" => \$debug_on,
+if (!GetOptions( "all" => \$all_on,
+		 "debug" => \$debug_on,
 		 "force" => \$force_on,
 		 "config=s" => \$configfile,
 		 "group=s" => \@groups)) {
-  print "Usage: $0 [--config=rsnap.conf] [--debug] [--force] [--group=group] [host1 .. hostN]\n";
+  print "Usage: $0 [--all] [--config=rsnap.conf] [--debug] [--force] [--group=group] [host1 .. hostN]\n";
   exit 1;
 }
 
@@ -29,12 +31,21 @@ my $started = time();
 my %rsnap_hosts;
 
 if ($#ARGV >= 0) {
+  if ($all_on) {
+    printf STDOUT ("Individual hosts specified, ignoring the `--all' command line option.\n");
+    $all_on = undef;
+  }
+
   foreach my $h (@ARGV) {
     $rsnap_hosts{$h} = 1;
   }
-} else {
-  # All hosts
-  $rsnap_hosts{"*"} = 1;
+}
+
+if (0 != scalar @groups) {
+  if ($all_on) {
+    printf STDOUT ("Groups specified, ignoring the `--all' command line option.\n");
+    $all_on = undef;
+  }
 }
 
 # Read the configuration file.
@@ -86,22 +97,27 @@ my @finished_jobs : shared;
 for my $h (keys %hosts) {
   my $host = $hosts{$h};
 
-  # If the hash rsnap_hosts is not empty and this host is not in the
-  # hash, we skip it.
-  if (!defined $rsnap_hosts{"*"} && !defined $rsnap_hosts{$h}) {
-    next;
-  }
+  if (!$all_on) {
 
-  # If we have groups selected, check if this host belongs to the
-  # right group.
-  if (0 != scalar @groups) {
     my $skip = 1;
-    for my $group (@groups) {
-      if (defined($host->{"group"}) && ($host->{"group"} eq $group)) {
-	$skip = 0;
-	last;
+
+    # If we have groups selected, check if this host belongs to one of
+    # the selected groups.
+    if (0 != scalar @groups) {
+      for my $group (@groups) {
+	if (defined($host->{"group"}) && ($host->{"group"} eq $group)) {
+	  $skip = 0;
+	  last;
+	}
       }
     }
+
+    # If hosts are selected, check if the current one is among the
+    # selected ones.
+    if (defined($rsnap_hosts{$h})) {
+      $skip = 0;
+    }
+
     if ($skip) {
       next;
     }
@@ -254,6 +270,10 @@ for my $h (keys %hosts) {
       debug("Scheduling job for host $h (".$f->{part}.")\n");
     }
   }
+}
+
+if (0 == scalar @scheduled_jobs) {
+  printf STDERR ("No hosts selected. Choose `--all', `--group' or individual hosts.\n");
 }
 
 # Sort the jobs by duration (longest job first).
@@ -448,7 +468,7 @@ for (my $i = 0; $i < $config{"threads"}; $i++) {
 
 # If we were backing up all hosts, and if an after_backup_script is
 # defined, run it now while the cleanup threads are running.
-if (defined $rsnap_hosts{"*"}) {
+if ($all_on) {
   if (defined $config{"after_backup_script"}) {
     $report = "";
 
@@ -475,7 +495,7 @@ for my $thread (@threads) {
 
 # If we were backing up all hosts, and if an after_cleanup_script is
 # defined, run it now after the cleanup threads have finished.
-if (defined $rsnap_hosts{"*"}) {
+if ($all_on) {
   if (defined $config{"after_cleanup_script"}) {
     $report = "";
 
