@@ -62,6 +62,7 @@ die "Failed to eval() file $configfile:\n$@\n" if ($@);
 set_default(\%config, "lockfile", "/var/run/rsnap.lock");
 set_default(\%config, "rotate", "7");
 set_default(\%config, "threads", "4");
+set_default(\%config, "cleanup_threads", "2");
 set_default(\%config, "host_parallel", "2");
 set_default(\%config, "exclude", "--exclude=/proc/ --exclude=/sys/");
 set_default(\%config, "snapshot_root", "/data/");
@@ -462,7 +463,7 @@ foreach my $h (sort keys %scheduled_hosts) {
 
 @threads = ();
 
-for (my $i = 0; $i < $config{"threads"}; $i++) {
+for (my $i = 0; $i < $config{"cleanup_threads"}; $i++) {
   push @threads, threads->create("cleanup_thread", $i);
 }
 
