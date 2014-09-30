@@ -305,25 +305,26 @@ $progress{hosts_done} = 0;
 $progress{jobs_total} = scalar @scheduled_jobs;
 $progress{jobs_done} = 0;
 
-for (my $i = 0; $i < $config{threads}; $i++) {
-  $progress{"thr_state_".$i} = "<idle>";
-}
-
 my $rsnap_lock : shared;
 
 # Start the progress thread
 my $progress_threads = threads->create("progress_thread");
 
 # Start the backup threads
-set_phase("Backing up");
+set_phase("Backing up (done %a/%b hosts, %c/%d jobs)");
 my @threads = ();
 
-for (my $i = 0; $i < $config{"threads"}; $i++) {
+for (my $i = 0; $i < $config{threads}; $i++) {
   push @threads, threads->create("backup_thread", $i);
+  $progress{"thr_state_".$i} = "<idle>";
 }
 
 for my $thread (@threads) {
   $thread->join;
+}
+
+for (my $i = 0; $i < $config{threads}; $i++) {
+  undef $progress{"thr_state_".$i};
 }
 
 # Finalize the backups.
@@ -347,17 +348,23 @@ if ($all_on && defined $config{after_all_backup_hook}) {
 }
 
 # Clean up
-set_phase("Cleaning up");
 my @cleanup_dirs : shared;
 
 foreach my $h (sort keys %scheduled_hosts) {
   push @cleanup_dirs, $scheduled_hosts{$h}{"dir"};
 }
 
+set_phase("Cleaning up (done %a/%b hosts)");
+
+$progress{hosts_total} = scalar @cleanup_dirs;
+$progress{hosts_done} = 0;
+
 @threads = ();
 
-for (my $i = 0; $i < $config{"cleanup_threads"}; $i++) {
+for (my $i = 0; $i < $config{cleanup_threads}; $i++) {
   push @threads, threads->create("cleanup_thread", $i);
+  $progress{"thr_state_".$i} = "<idle>";
+  $progress{"thr_start_".$i} = 0;
 }
 
 # Call during_all_cleanup_hook if defined.
@@ -368,6 +375,10 @@ if ($all_on && defined $config{during_all_cleanup_hook}) {
 # Now, wait for the cleanup threads to finish.
 for my $thread (@threads) {
   $thread->join;
+}
+
+for (my $i = 0; $i < $config{cleanup_threads}; $i++) {
+  undef $progress{"thr_state_".$i};
 }
 
 # Call after_all_cleanup_hook if defined.
@@ -473,8 +484,8 @@ sub backup_thread
 #
 sub cleanup_thread
 {
-  my ($number) = @_;
-  debug("Cleanup thread $number: started.\n");
+  my ($thread_number) = @_;
+  debug("Cleanup thread $thread_number: started.\n");
 
   while (1) {
     my ($dir) = next_cleanup_dir();
@@ -484,12 +495,19 @@ sub cleanup_thread
 
     my $deldir = $dir."/".$config{"archive_name"}.".delete";
 
+    $progress{"thr_state_".$thread_number} = $deldir;
+
     `/bin/rm -rf $deldir`;
 
-    debug("Cleanup thread $number: cleaned up $dir.\n");
+    lock($rsnap_lock);
+    $progress{hosts_done}++;
+
+    debug("Cleanup thread $thread_number: cleaned up $dir.\n");
   }
 
-  debug("Cleanup thread $number: ended.\n");
+  $progress{"thr_state_".$thread_number} = "<finished>";
+
+  debug("Cleanup thread $thread_number: ended.\n");
 }
 
 # ----------------------------------------------------------------------------
@@ -569,38 +587,37 @@ sub update_progress
 	strftime("%Y%m%d %H:%M:%S", localtime($started)),
 	format_duration($now - $started);
 
+    my $phase = $progress{phase};
+    $phase =~ s/%a/$progress{hosts_done}/g;
+    $phase =~ s/%b/$progress{hosts_total}/g;
+    $phase =~ s/%c/$progress{jobs_done}/g;
+    $phase =~ s/%d/$progress{jobs_total}/g;
+
     printf PROGRESS
         "Phase: %s\n\n",
-        $progress{phase};
+        $phase;
 
-    printf PROGRESS
-	"Hosts done: %d/%d\n",
-	$progress{hosts_done},
-	$progress{hosts_total};
-    printf PROGRESS
-	"Jobs done: %d/%d\n",
-	$progress{jobs_done},
-	$progress{jobs_total};
+    if (defined $progress{"thr_state_0"}) {
+      printf PROGRESS "Threads:\n";
 
-    printf PROGRESS "\nThreads::\n";
+      for (my $i = 0; defined($progress{"thr_state_".$i}); $i++) {
+        my $time = "";
+        my $start = $progress{"thr_start_".$i};
+        my $last = $progress{"thr_last_".$i};
 
-    for (my $i = 0; $i < $config{threads}; $i++) {
-      my $time = "";
-      my $start = $progress{"thr_start_".$i};
-      my $last = $progress{"thr_last_".$i};
+        if ($start > 0) {
+	  $time = sprintf(" since %s", format_duration($now - $start));
+	  if ($last != 0) {
+	    $time .= sprintf(" (last: %s)", format_duration($last));
+	  }
+        }
 
-      if ($start > 0) {
-	$time = sprintf(" since %s", format_duration($now - $start));
-	if ($last != 0) {
-	  $time .= sprintf(" (last: %s)", format_duration($last));
-	}
+        printf PROGRESS
+	    "%d: %s%s\n",
+	    $i,
+	    $progress{"thr_state_".$i},
+	    $time;
       }
-
-      printf PROGRESS
-	  "%d: %s%s\n",
-	  $i,
-	  $progress{"thr_state_".$i},
-	  $time;
     }
 
     close PROGRESS;
@@ -617,7 +634,6 @@ sub set_phase
   my ($phase) = @_;
 
   $progress{phase} = $phase;
-  print "Phase: $phase\n";
 }
 
 # ----------------------------------------------------------------------------
