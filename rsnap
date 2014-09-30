@@ -283,6 +283,7 @@ if (0 == scalar @scheduled_jobs) {
 # Prepare progress structure.
 my %progress : shared;
 
+$progress{phase} = "Initializing";
 $progress{hosts_total} = scalar values %scheduled_hosts;
 $progress{hosts_done} = 0;
 $progress{jobs_total} = scalar @scheduled_jobs;
@@ -298,6 +299,7 @@ my $rsnap_lock : shared;
 my $progress_threads = threads->create("progress_thread");
 
 # Start the backup threads
+set_phase("Backing up");
 my @threads = ();
 
 for (my $i = 0; $i < $config{"threads"}; $i++) {
@@ -324,6 +326,7 @@ open OK, ">".$config{"okfile"};
 close OK;
 
 # Clean up
+set_phase("Cleaning up");
 my @cleanup_dirs : shared;
 
 foreach my $h (sort keys %scheduled_hosts) {
@@ -340,7 +343,7 @@ for (my $i = 0; $i < $config{"cleanup_threads"}; $i++) {
 # defined, run it now while the cleanup threads are running.
 if ($all_on) {
   if (defined $config{"after_backup_script"}) {
-    $report = "";
+    my $report = "";
 
     open SCRIPT, $config{"after_backup_script"}." 2>&1 |";
     while (my $line = <SCRIPT>) {
@@ -367,7 +370,7 @@ for my $thread (@threads) {
 # defined, run it now after the cleanup threads have finished.
 if ($all_on) {
   if (defined $config{"after_cleanup_script"}) {
-    $report = "";
+    my $report = "";
 
     open SCRIPT, $config{"after_cleanup_script"}." 2>&1 |";
     while (my $line = <SCRIPT>) {
@@ -580,6 +583,10 @@ sub update_progress
 	format_duration($now - $started);
 
     printf PROGRESS
+        "Phase: %s\n\n",
+        $progress{phase};
+
+    printf PROGRESS
 	"Hosts: %d/%d\n",
 	$progress{hosts_done},
 	$progress{hosts_total};
@@ -611,6 +618,19 @@ sub update_progress
 
     close PROGRESS;
   }
+}
+
+# ----------------------------------------------------------------------------
+# Set progress "Phase:" string.
+#
+sub set_phase
+{
+  lock($rsnap_lock);
+
+  my ($phase) = @_;
+
+  $progress{phase} = $phase;
+  print "Phase: $phase\n";
 }
 
 # ----------------------------------------------------------------------------
