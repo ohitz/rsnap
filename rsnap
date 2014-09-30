@@ -159,6 +159,22 @@ for my $h (keys %hosts) {
     $scheduled_hosts{$h}{rsync_options} = $config{rsync_options};
   }
 
+  # Hook executed after this host has been backed up.
+  my $hook;
+  if (defined($host->{after_host_backup_hook})) {
+    $hook = $host->{after_host_backup_hook};
+  } elsif (defined $config{after_host_backup_hook}) {
+    $hook = $config{after_host_backup_hook};
+  }
+  if (defined $hook) {
+    $scheduled_hosts{$h}{after_host_backup_hook} = &share({});
+    $scheduled_hosts{$h}{after_host_backup_hook}{command} = $hook->{command};
+    $scheduled_hosts{$h}{after_host_backup_hook}{progress} = $hook->{progress};
+    $scheduled_hosts{$h}{after_host_backup_hook}{email_to} = $hook->{email_to};
+    $scheduled_hosts{$h}{after_host_backup_hook}{email_from} = $hook->{email_from};
+    $scheduled_hosts{$h}{after_host_backup_hook}{email_subject} = $hook->{email_subject};
+  }
+
   $scheduled_hosts{$h}{"initialized"} = undef;
 
   $scheduled_hosts{$h}{"errors"} = 0;
@@ -325,6 +341,11 @@ if (-f $config{"okfile"}) {
 open OK, ">".$config{"okfile"};
 close OK;
 
+# Call after_all_backup_hook if defined.
+if ($all_on && defined $config{after_all_backup_hook}) {
+  call_hook($config{after_all_backup_hook});
+}
+
 # Clean up
 set_phase("Cleaning up");
 my @cleanup_dirs : shared;
@@ -339,26 +360,9 @@ for (my $i = 0; $i < $config{"cleanup_threads"}; $i++) {
   push @threads, threads->create("cleanup_thread", $i);
 }
 
-# If we were backing up all hosts, and if an after_backup_script is
-# defined, run it now while the cleanup threads are running.
-if ($all_on) {
-  if (defined $config{"after_backup_script"}) {
-    my $report = "";
-
-    open SCRIPT, $config{"after_backup_script"}." 2>&1 |";
-    while (my $line = <SCRIPT>) {
-      $report .= $line;
-    }
-    close SCRIPT;
-
-    # Send report by email if configured.
-    if ($config{after_backup_email_to} ne "") {
-      send_email($config{after_backup_email_from},
-                 $config{after_backup_email_to},
-                 $config{after_backup_email_subject},
-                 $report);
-    }
-  }
+# Call during_all_cleanup_hook if defined.
+if ($all_on && defined $config{during_all_cleanup_hook}) {
+  call_hook($config{during_all_cleanup_hook});
 }
 
 # Now, wait for the cleanup threads to finish.
@@ -366,26 +370,9 @@ for my $thread (@threads) {
   $thread->join;
 }
 
-# If we were backing up all hosts, and if an after_cleanup_script is
-# defined, run it now after the cleanup threads have finished.
-if ($all_on) {
-  if (defined $config{"after_cleanup_script"}) {
-    my $report = "";
-
-    open SCRIPT, $config{"after_cleanup_script"}." 2>&1 |";
-    while (my $line = <SCRIPT>) {
-      $report .= $line;
-    }
-    close SCRIPT;
-
-    # Send report by email if configured.
-    if ($config{after_cleanup_email_to} ne "") {
-      send_email($config{after_cleanup_email_from},
-                 $config{after_cleanup_email_to},
-                 $config{after_cleanup_email_subject},
-                 $report);
-    }
-  }
+# Call after_all_cleanup_hook if defined.
+if ($all_on && defined $config{after_all_cleanup_hook}) {
+  call_hook($config{after_all_cleanup_hook});
 }
 
 # Wait for the progress_thread to finish.
@@ -587,11 +574,11 @@ sub update_progress
         $progress{phase};
 
     printf PROGRESS
-	"Hosts: %d/%d\n",
+	"Hosts done: %d/%d\n",
 	$progress{hosts_done},
 	$progress{hosts_total};
     printf PROGRESS
-	"Jobs: %d/%d\n",
+	"Jobs done: %d/%d\n",
 	$progress{jobs_done},
 	$progress{jobs_total};
 
@@ -781,6 +768,13 @@ sub backup_finalize
       # Create new "latest" symlink.
       `ln -s $config{"archive_name"}.$suffix $root/$config{"archive_name"}.latest`;
       `ln -s $config{"archive_name"}.$suffix.items $root/$config{"archive_name"}.items.latest`;
+
+      # Call after_host_backup_hook.
+      if (defined $host->{"after_host_backup_hook"}) {
+        call_hook($host->{"after_host_backup_hook"},
+                  $host->{hostname},
+                  $root."/".$config{"archive_name"}.".".$suffix);
+      }
     }
 
     # Create the .delete directory
@@ -1106,4 +1100,47 @@ sub send_email
   print MAIL "\n";
   print MAIL $message;
   close MAIL;
+}
+
+# ----------------------------------------------------------------------------
+# Call hook
+#
+sub call_hook
+{
+  my ($hook, $host, $path) = @_;
+
+  my $command = $hook->{command};
+  my $progress = $hook->{progress};
+  my $subject = $hook->{email_subject};
+
+  if ($host ne "" && $path ne "") {
+    $command =~ s/%h/$host/g;
+    $command =~ s/%p/$path/g;
+
+    $progress =~ s/%h/$host/g;
+    $progress =~ s/%p/$path/g;
+
+    $subject =~ s/%h/$host/g;
+    $subject =~ s/%p/$path/g;
+  }
+
+  if ($progress ne "") {
+    set_phase($progress);
+  }
+
+  my $report = "";
+
+  open HOOK, "$command 2>&1 |";
+  while (my $line = <HOOK>) {
+    $report .= $line;
+  }
+  close HOOK;
+
+  # Send report by email if configured.
+  if ($hook->{email_to} ne "") {
+    send_email($hook->{email_from},
+               $hook->{email_to},
+               $subject,
+               $report);
+  }
 }
