@@ -447,7 +447,7 @@ sub backup_thread
   mkdirp($tempdir);
 
   while (has_backup_jobs()) {
-    my ($job) = next_backup_job();
+    my ($job) = next_backup_job($thread_number);
     if ($job) {
       my $start = time();
       debug("Backup thread $thread_number: got job ".$job->{"hostname"}."\n");
@@ -643,8 +643,16 @@ sub next_backup_job
 {
   lock($rsnap_lock);
 
+  my ($thread_number) = @_;
+
   for (my $i = 0; $i <= $#scheduled_jobs; $i++) {
-    my $job = $scheduled_jobs[$i];
+    my $index = $i;
+    if ($thread_number % 2 == 1) {
+      # Odd thread, consume jobs from bottom
+      $index = $#scheduled_jobs + 1 - $i;
+    }
+
+    my $job = $scheduled_jobs[$index];
     my $host = $scheduled_hosts{$job->{"hostname"}};
 
     # Check if the host in question still has capacity for this job.
@@ -652,7 +660,7 @@ sub next_backup_job
       # Yes, there is enough capacity
 
       # Remove the job from the list of jobs.
-      for (my $j = $i; $j <= $#scheduled_jobs-1; $j++) {
+      for (my $j = $index; $j <= $#scheduled_jobs-1; $j++) {
 	$scheduled_jobs[$j] = $scheduled_jobs[$j+1];
       }
       pop @scheduled_jobs;
