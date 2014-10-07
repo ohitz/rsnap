@@ -291,6 +291,7 @@ for my $h (keys %hosts) {
 
 if (0 == scalar @scheduled_jobs) {
   printf STDERR ("No hosts selected. Choose `--all', `--group' or individual hosts.\n");
+  exit 1;
 }
 
 # Sort the jobs by duration (longest job first).
