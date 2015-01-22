@@ -12,15 +12,17 @@ use strict;
 my $all_on;
 my $debug_on;
 my $force_on;
+my $no_cleanup;
 my $configfile = "/etc/rsnap.conf";
 my @groups;
 
 if (!GetOptions( "all" => \$all_on,
 		 "debug" => \$debug_on,
 		 "force" => \$force_on,
+                 "no-cleanup" => \$no_cleanup,
 		 "config=s" => \$configfile,
 		 "group=s" => \@groups)) {
-  print "Usage: $0 [--all] [--config=rsnap.conf] [--debug] [--force] [--group=group] [host1 .. hostN]\n";
+  print "Usage: $0 [--all] [--config=rsnap.conf] [--debug] [--force] [--group=group] [--no-cleanup] [host1 .. hostN]\n";
   exit 1;
 }
 
@@ -348,43 +350,45 @@ if ($all_on && defined $config{after_all_backup_hook}) {
   call_hook($config{after_all_backup_hook});
 }
 
-# Clean up
 my @cleanup_dirs : shared;
 
-foreach my $h (sort keys %scheduled_hosts) {
-  push @cleanup_dirs, $scheduled_hosts{$h}{"dir"};
-}
+if (!$no_cleanup) {
+  # Clean up
+  foreach my $h (sort keys %scheduled_hosts) {
+    push @cleanup_dirs, $scheduled_hosts{$h}{"dir"};
+  }
+  
+  set_phase("Cleaning up (done %a/%b hosts)");
+  
+  $progress{hosts_total} = scalar @cleanup_dirs;
+  $progress{hosts_done} = 0;
+  
+  @threads = ();
+  
+  for (my $i = 0; $i < $config{cleanup_threads}; $i++) {
+    push @threads, threads->create("cleanup_thread", $i);
+    $progress{"thr_state_".$i} = "<idle>";
+    $progress{"thr_start_".$i} = 0;
+  }
+  
+  # Call during_all_cleanup_hook if defined.
+  if ($all_on && defined $config{during_all_cleanup_hook}) {
+    call_hook($config{during_all_cleanup_hook});
+  }
+  
+  # Now, wait for the cleanup threads to finish.
+  for my $thread (@threads) {
+    $thread->join;
+  }
 
-set_phase("Cleaning up (done %a/%b hosts)");
+  for (my $i = 0; $i < $config{cleanup_threads}; $i++) {
+    undef $progress{"thr_state_".$i};
+  }
 
-$progress{hosts_total} = scalar @cleanup_dirs;
-$progress{hosts_done} = 0;
-
-@threads = ();
-
-for (my $i = 0; $i < $config{cleanup_threads}; $i++) {
-  push @threads, threads->create("cleanup_thread", $i);
-  $progress{"thr_state_".$i} = "<idle>";
-  $progress{"thr_start_".$i} = 0;
-}
-
-# Call during_all_cleanup_hook if defined.
-if ($all_on && defined $config{during_all_cleanup_hook}) {
-  call_hook($config{during_all_cleanup_hook});
-}
-
-# Now, wait for the cleanup threads to finish.
-for my $thread (@threads) {
-  $thread->join;
-}
-
-for (my $i = 0; $i < $config{cleanup_threads}; $i++) {
-  undef $progress{"thr_state_".$i};
-}
-
-# Call after_all_cleanup_hook if defined.
-if ($all_on && defined $config{after_all_cleanup_hook}) {
-  call_hook($config{after_all_cleanup_hook});
+  # Call after_all_cleanup_hook if defined.
+  if ($all_on && defined $config{after_all_cleanup_hook}) {
+    call_hook($config{after_all_cleanup_hook});
+  }
 }
 
 # Wait for the progress_thread to finish.
