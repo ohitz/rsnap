@@ -335,8 +335,26 @@ foreach my $host (values %scheduled_hosts) {
   backup_finalize($host);
 }
 
+my $report = create_backup_report();
+
+if ($config{"reports_dir"}) {
+  my $reports_dir = $config{"reports_dir"};
+  if (-d $reports_dir) {
+    my $report_name = sprintf("rsnap.%s.txt", strftime("%Y%m%d-%H%M%S", localtime($started)));
+
+    if (open REPORT, ">".$reports_dir."/".$report_name) {
+      print REPORT $report;
+      close REPORT;
+    } else {
+      printf STDERR ("Cannot write report to `%s/%s'.\n", $reports_dir, $report_name);
+    }
+  } else {
+    printf STDERR ("reports_dir `%s' is not a directory.\n", $reports_dir);
+  }
+}
+
 # Create backup report.
-send_backup_report();
+send_backup_report($report);
 
 # Create the "okfile" once the backup is done.
 if (-f $config{"okfile"}) {
@@ -930,9 +948,9 @@ sub backup
 }
 
 # ----------------------------------------------------------------------------
-# send_backup_report
+# create_backup_report
 #
-sub send_backup_report()
+sub create_backup_report()
 {
   # Create and send report.
   my $report = "";
@@ -1058,6 +1076,18 @@ sub send_backup_report()
 		     $total->{"bytes_sent"} / 1024.0,
                      format_duration($total->{duration}));
 
+  debug($report);
+
+  return $report;
+}
+
+# ----------------------------------------------------------------------------
+# send_backup_report
+#
+sub send_backup_report()
+{
+  my $report = shift;
+  
   # Send report by email if configured.
   if ($config{email_to} ne "") {
     send_email($config{email_from},
@@ -1065,8 +1095,6 @@ sub send_backup_report()
                $config{email_subject},
                $report);
   }
-  
-  debug($report);
 }
 
 # ----------------------------------------------------------------------------
