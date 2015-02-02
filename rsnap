@@ -15,14 +15,16 @@ my $force_on;
 my $no_cleanup;
 my $configfile = "/etc/rsnap.conf";
 my @groups;
+my @options;
 
 if (!GetOptions( "all" => \$all_on,
 		 "debug" => \$debug_on,
 		 "force" => \$force_on,
                  "no-cleanup" => \$no_cleanup,
 		 "config=s" => \$configfile,
-		 "group=s" => \@groups)) {
-  print "Usage: $0 [--all] [--config=rsnap.conf] [--debug] [--force] [--group=group] [--no-cleanup] [host1 .. hostN]\n";
+		 "group=s" => \@groups,
+                 "o|option=s" => \@options)) {
+  print "Usage: $0 [--all] [--config=rsnap.conf] [--debug] [--force] [--group=group] [--no-cleanup] [--option K=V] [host1 .. hostN]\n";
   exit 1;
 }
 
@@ -79,6 +81,18 @@ set_default(\%config, "progress_file", "/var/run/rsnap.progress");
 # the file of another rsnap process.
 if ($force_on) {
   $config{progress_file} = "";
+}
+
+# Apply options given on the command line.
+for my $option (@options) {
+  if ($option =~ /^([^=]*)=(.*)$/) {
+    my $opt = $1;
+    my $arg = $2;
+    $opt =~ s/^\s+|\s+$//g;
+    $arg =~ s/^\s+|\s+$//g;
+
+    $config{$opt} = $arg;
+  }
 }
 
 # Check if already running.
