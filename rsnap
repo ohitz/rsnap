@@ -279,6 +279,7 @@ for my $h (keys %hosts) {
     $scheduled_jobs[$j] = &share({});
     $scheduled_jobs[$j]{"hostname"} = $h;
     $scheduled_jobs[$j]{"part"} = "full";
+    $scheduled_jobs[$j]{"part_quoted"} = "full";
     $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
     $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
     $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
@@ -293,6 +294,8 @@ for my $h (keys %hosts) {
       $scheduled_jobs[$j] = &share({});
       $scheduled_jobs[$j]{"hostname"} = $h;
       $scheduled_jobs[$j]{"part"} = $f->{part};
+      $scheduled_jobs[$j]{"part_quoted"} = $f->{part};
+      $scheduled_jobs[$j]{"part_quoted"} =~ s/\ /_/g;
       $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
       $scheduled_jobs[$j]{"filter"} = $f->{expr};
       $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
@@ -562,7 +565,7 @@ sub get_last_duration
   }
 
   # Try to open the last_duration file
-  open LD, $lddir."/".$job->{"part"} or return 0;
+  open LD, $lddir."/".$job->{"part_quoted"} or return 0;
   my $last_duration = int <LD>;
   close LD;
 
@@ -581,7 +584,7 @@ sub store_last_duration
   mkdirp($lddir);
 
   # Create the last_duration file.
-  open LD, ">".$lddir."/".$job->{"part"} or return 0;
+  open LD, ">".$lddir."/".$job->{"part_quoted"} or return 0;
   print LD $job->{"last_duration"};
   close LD;
 }
@@ -922,7 +925,7 @@ sub backup
   my $bytes_total;
   my $bytes_sent;
 
-  my $info_file = $root."/".$config{"archive_name"}.".items/".$job->{"part"}.".txt";
+  my $info_file = $root."/".$config{"archive_name"}.".items/".$job->{"part_quoted"}.".txt";
 
   # Print filter to .items file.
   open INFO, ">$info_file";
