@@ -17,6 +17,11 @@ my $configfile = "/etc/rsnap.conf";
 my @groups;
 my @options;
 
+$SIG{INT} = sub {
+  cleanup();
+  die "Interrupted";
+};
+
 if (!GetOptions( "all" => \$all_on,
 		 "debug" => \$debug_on,
 		 "force" => \$force_on,
@@ -96,7 +101,9 @@ for my $option (@options) {
 }
 
 # Check if already running.
-if (!$force_on) {
+if ($force_on) {
+  $config{lockfile} = "";
+} else {
   if (-f $config{lockfile}) {
     printf STDERR ("Lock file '%s' exists, is rsnap already running?\n",
 		   $config{lockfile});
@@ -430,16 +437,19 @@ if (!$no_cleanup) {
 $progress{quit} = 1;
 $progress_threads->join();
 
-if (!$force_on) {
-  # Remove lockfile
-  unlink $config{"lockfile"};
-}
-
-if ($config{progress_file} ne "") {
-  unlink($config{progress_file});
-}
+cleanup();
 
 exit 0;
+
+sub cleanup
+{
+  if ($config{lockfile} ne "" && -f $config{lockfile}) {
+    unlink $config{lockfile};
+  }
+  if ($config{progress_file} ne "" && -f $config{progress_file}) {
+    unlink($config{progress_file});
+  }
+}
 
 # ----------------------------------------------------------------------------
 # Output a debug message.
