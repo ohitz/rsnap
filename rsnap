@@ -317,6 +317,7 @@ for my $h (keys %hosts) {
 
 if (0 == scalar @scheduled_jobs) {
   printf STDERR ("No hosts selected. Choose `--all', `--group' or individual hosts.\n");
+  cleanup();
   exit 1;
 }
 
