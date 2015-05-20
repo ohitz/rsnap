@@ -959,8 +959,8 @@ sub backup
 
     if ($line =~ /^Number of files: (\d+)\D/) {
       $files_total = $1;
-    } elsif ($line =~ /^Number of files transferred: (\d+)\D/) {
-      $files_sent = $1;
+    } elsif ($line =~ /^Number of (regular )?files transferred: (\d+)\D/) {
+      $files_sent = $2;
     } elsif ($line =~ /^Total file size: (\d+)\D/) {
       $bytes_total = $1 / (1024*1024);
     } elsif ($line =~ /^Total transferred file size: (\d+)\D/) {
