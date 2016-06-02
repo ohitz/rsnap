@@ -273,23 +273,32 @@ sub dump_thread
     if ($job) {
       debug("Dump thread %d (%s): new job", $thread_number, $job->{hostname});
 
-      my $cmd = sprintf("xfsdump -s %s -l 0 -p 60 - %s > %s/%s.dump",
-			$job->{relpath},
-			$job->{device},
-                        $cfg_dumpdir,
-                        $job->{hostname});
+      my $dumpfile = sprintf("%s/%s.dump", $cfg_dumpdir, $job->{hostname});
+      if (-f $dumpfile) {
+        debug("Dump thread %d (%s): dump file %s already exists.",
+              $thread_number,
+              $job->{hostname},
+              $dumpfile);
+      } else {
+        my $cmd = sprintf("xfsdump -s %s -l 0 -p 60 - %s > %s.tmp",
+                          $job->{relpath},
+                          $job->{device},
+                          $dumpfile);
 
-      debug("Dump thread %d (%s): %s", $thread_number, $job->{hostname}, $cmd);
+        debug("Dump thread %d (%s): %s", $thread_number, $job->{hostname}, $cmd);
 
-      if (!$cfg_dry_run) {
-        open3(\*IN, \*OUT, \*ERR, $cmd);
-        my $result = "";
-        while (my $line = <ERR>) {
-          chomp($line);
-          $result .= $line;
-          msg("Dump thread %d (%s): %s", $thread_number, $job->{hostname}, $line);
+        if (!$cfg_dry_run) {
+          open3(\*IN, \*OUT, \*ERR, $cmd);
+          my $result = "";
+          while (my $line = <ERR>) {
+            chomp($line);
+            $result .= $line;
+            msg("Dump thread %d (%s): %s", $thread_number, $job->{hostname}, $line);
+          }
+          close(ERR);
+
+          rename $dumpfile.".tmp", $dumpfile;
         }
-        close(ERR);
       }
       
       debug("Dump thread %d (%s): finished job ", $thread_number, $job->{hostname});
