@@ -256,12 +256,12 @@ exit 0;
 sub dump_thread
 {
   my ($thread_number) = @_;
-  debug("Dump thread $thread_number: started.");
+  debug("Dump thread %d: started.", $thread_number);
   
   while (has_dump_jobs()) {
     my ($job) = next_dump_job($thread_number);
     if ($job) {
-      debug("Dump thread $thread_number: got job ".$job->{hostname});
+      debug("Dump thread %d (%s): new job", $thread_number, $job->{hostname});
 
       my $cmd = sprintf("xfsdump -s %s -l 0 -p 60 - %s > %s/%s.dump",
 			$job->{relpath},
@@ -269,7 +269,7 @@ sub dump_thread
                         $cfg_dumpdir,
                         $job->{hostname});
 
-      debug("Dump thread $thread_number: ".$cmd);
+      debug("Dump thread %d (%s): %s", $thread_number, $job->{hostname}, $cmd);
 
       if (!$cfg_dry_run) {
         open3(\*IN, \*OUT, \*ERR, $cmd);
@@ -277,12 +277,12 @@ sub dump_thread
         while (my $line = <ERR>) {
           chomp($line);
           $result .= $line;
-          msg("Dump thread $thread_number: ".$line);
+          msg("Dump thread %d (%s): %s", $thread_number, $job->{hostname}, $line);
         }
         close(ERR);
       }
       
-      debug("Dump thread $thread_number: finished job ".$job->{hostname});
+      debug("Dump thread %d (%s): finished job ", $thread_number, $job->{hostname});
     }
   }
 }
