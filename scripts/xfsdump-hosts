@@ -44,8 +44,10 @@ be dumped by this tool.
 
 =item B<--all>
 
-Dump all hosts found in the B<snap> configuration file, not only hosts
-which have B<ext_xfsdump> set to 1.
+Dump all hosts found in the B<snap> configuration file, except for
+those which have B<ext_xfsdump> set to 0. If B<--all> is not
+specified, only hosts which have B<ext_xfsdump> set to 1 will be
+dumped.
 
 =item B<--rotations>=I<ROTATIONS> (default: B<7>)
 
@@ -75,9 +77,9 @@ the following into the configuration file:
         progress => "Storing data to NAS.",
     }    
 
-To select which hosts to dump, set B<ext_xfsdump> to 1 in the
-configuration file or specify the B<--all> option on the command line
-to select all hosts:
+To select which hosts to dump, either set B<ext_xfsdump> to 1 or
+specify the B<--all> command line option and exclude unwanted hosts by
+setting B<ext_xfsdump> to 0:
 
     "server-1.domain.com" => {
         ext_xfsdump => 1
@@ -161,8 +163,16 @@ for my $hostname (sort keys %hosts) {
   my $host = $hosts{$hostname};
 
   # Check if marked for dumping.
-  if (!$cfg_all && $host->{ext_xfsdump} != 1) {
-    next;
+  if ($cfg_all) {
+    # Skip if ext_xfsdump is 0.
+    if (defined $host->{ext_xfsdump} && $host->{ext_xfsdump} == 0) {
+      next;
+    }
+  } else {
+    # Skip if ext_xfsdump is not 1.
+    if ($host->{ext_xfsdump} != 1) {
+      next;
+    }
   }
   
   # Construct path.
