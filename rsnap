@@ -81,6 +81,7 @@ set_default(\%config, "rsh_program", "ssh -c arcfour -o StrictHostKeyChecking=no
 set_default(\%config, "rsync_program", "/usr/bin/rsync");
 set_default(\%config, "rsync_options", "");
 set_default(\%config, "progress_file", "/var/run/rsnap.progress");
+set_default(\%config, "rm_program", "rm");
 
 # If forcing, don't create a progress file, we don't want to overwrite
 # the file of another rsnap process.
@@ -548,7 +549,8 @@ sub cleanup_thread
 
     $progress{"thr_state_".$thread_number} = $deldir;
 
-    `/bin/rm -rf $deldir`;
+    my $cmd = sprintf("%s -rf %s", $config{"rm_program"}, $deldir);
+    `$cmd`;
 
     lock($rsnap_lock);
     $progress{hosts_done}++;
