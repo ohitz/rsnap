@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 #
-# Copyright (C) 2008-2015 Oliver Hitz <oliver@net-track.ch>
+# Copyright (C) 2008-2017 Oliver Hitz <oliver@net-track.ch>
 #
 use POSIX qw(strftime);
 use Getopt::Long;
@@ -34,6 +34,7 @@ if (!GetOptions( "all" => \$all_on,
 }
 
 my $started = time();
+my $started_weekday = (localtime($started))[6];
 
 # The remaining options are host names. We take note of them using the
 # hash rsnap_hosts.
@@ -144,6 +145,15 @@ for my $h (keys %hosts) {
     }
 
     if ($skip) {
+      next;
+    }
+  }
+
+  # Check weekday if the current host is supposed only to be backed
+  # up on specific days.
+  if (defined($host->{"weekdays"})) {
+    if (!grep /$started_weekday/, @{ $host->{weekdays} }) {
+      # Don't run host on the current weekday
       next;
     }
   }
