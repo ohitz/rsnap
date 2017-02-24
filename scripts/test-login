@@ -1,0 +1,124 @@
+#!/usr/bin/perl
+#
+# Copyright (C) 2017 Oliver Hitz <oliver@net-track.ch>
+
+use Getopt::Long;
+use strict;
+
+# Disable output buffering.
+$| = 1;
+
+my $opt_configfile = "/etc/rsnap.conf";
+my $opt_all;
+my @opt_groups;
+
+if (!GetOptions("config=s" => \$opt_configfile,
+		"group=s" => \@opt_groups,
+		"all" => \$opt_all)) {
+  print "Usage: $0 [--group=...] [--all] [--config=rsnap.conf]\n";
+  exit 1;
+}
+
+# Read the configuration file.
+my %config;
+my %hosts;
+
+open(FILE, $opt_configfile) || die "Failed to open $opt_configfile\n";
+my @lines = <FILE>;
+close(FILE);
+eval("@lines");
+die "Failed to eval() file $opt_configfile:\n$@\n" if ($@);
+
+# The remaining options are host names.
+my %selected_hosts;
+
+if ($#ARGV >= 0) {
+  if ($opt_all) {
+    printf STDOUT ("Individual hosts specified, ignoring the `--all' command line option.\n");
+    $opt_all = undef;
+  }
+
+  foreach my $h (@ARGV) {
+    if (!$hosts{$h}) {
+      printf STDERR "Host `$h' not known.\n";
+      exit 1;
+    }
+    $selected_hosts{$h} = 1;
+  }
+}
+
+if (0 != scalar @opt_groups) {
+  if ($opt_all) {
+    printf STDOUT ("Groups specified, ignoring the `--all' command line option.\n");
+    $opt_all = undef;
+  }
+}
+
+if (!%selected_hosts &&
+    !@opt_groups &&
+    !$opt_all) {
+  printf STDERR "No hosts selected!\n";
+  exit 0;
+}
+
+#
+my @error_hosts;
+my @ok_hosts;
+
+for my $h (keys %hosts) {
+  my $host = $hosts{$h};
+
+  if (!$opt_all) {
+
+    my $skip = 1;
+
+    # If we have groups selected, check if this host belongs to one of
+    # the selected groups.
+    if (0 != scalar @opt_groups) {
+      for my $group (@opt_groups) {
+	if (defined($host->{"group"}) && ($host->{"group"} eq $group)) {
+	  $skip = 0;
+	  last;
+	}
+      }
+    }
+
+    # If hosts are selected, check if the current one is among the
+    # selected ones.
+    if (defined($selected_hosts{$h})) {
+      $skip = 0;
+    }
+
+    if ($skip) {
+      next;
+    }
+  }
+
+  print ".";
+  
+  my $cmd = "ssh -o StrictHostKeyChecking=no $h /bin/true";
+
+  system($cmd." 2>&1");
+
+  # Status code
+  my $status = $? >> 8;
+
+  if ($status == 0) {
+     push @ok_hosts, $h;
+  } else {
+     push @error_hosts, $h;
+  }
+}
+
+print "\n";
+
+if (@error_hosts) {
+  print "Login errors on the following hosts:\n";
+  foreach my $h (@error_hosts) {
+    print "$h\n";
+  }
+} else {
+  print "No login errors!\n";
+}
+
+exit 0;
