@@ -9,26 +9,26 @@ use threads;
 use threads::shared;
 use strict;
 
-my $all_on;
-my $debug_on;
-my $force_on;
-my $no_cleanup;
-my $configfile = "/etc/rsnap.conf";
-my @groups;
-my @options;
+my $opt_all_on;
+my $opt_debug_on;
+my $opt_force_on;
+my $opt_no_cleanup;
+my $opt_configfile = "/etc/rsnap.conf";
+my @opt_groups;
+my @opt_options;
 
 $SIG{INT} = sub {
   cleanup();
   die "Interrupted";
 };
 
-if (!GetOptions( "all" => \$all_on,
-		 "debug" => \$debug_on,
-		 "force" => \$force_on,
-                 "no-cleanup" => \$no_cleanup,
-		 "config=s" => \$configfile,
-		 "group=s" => \@groups,
-                 "o|option=s" => \@options)) {
+if (!GetOptions( "all" => \$opt_all_on,
+		 "debug" => \$opt_debug_on,
+		 "force" => \$opt_force_on,
+                 "no-cleanup" => \$opt_no_cleanup,
+		 "config=s" => \$opt_configfile,
+		 "group=s" => \@opt_groups,
+                 "o|option=s" => \@opt_options)) {
   print "Usage: $0 [--all] [--config=rsnap.conf] [--debug] [--force] [--group=group] [--no-cleanup] [--option K=V] [host1 .. hostN]\n";
   exit 1;
 }
@@ -41,9 +41,9 @@ my $started_weekday = (localtime($started))[6];
 my %rsnap_hosts;
 
 if ($#ARGV >= 0) {
-  if ($all_on) {
+  if ($opt_all_on) {
     printf STDOUT ("Individual hosts specified, ignoring the `--all' command line option.\n");
-    $all_on = undef;
+    $opt_all_on = undef;
   }
 
   foreach my $h (@ARGV) {
@@ -51,10 +51,10 @@ if ($#ARGV >= 0) {
   }
 }
 
-if (0 != scalar @groups) {
-  if ($all_on) {
+if (0 != scalar @opt_groups) {
+  if ($opt_all_on) {
     printf STDOUT ("Groups specified, ignoring the `--all' command line option.\n");
-    $all_on = undef;
+    $opt_all_on = undef;
   }
 }
 
@@ -62,11 +62,11 @@ if (0 != scalar @groups) {
 my %config;
 my %hosts;
 
-open(FILE, $configfile) || die "Failed to open $configfile\n";
+open(FILE, $opt_configfile) || die "Failed to open $opt_configfile\n";
 my @lines = <FILE>;
 close(FILE);
 eval("@lines");
-die "Failed to eval() file $configfile:\n$@\n" if ($@);
+die "Failed to eval() file $opt_configfile:\n$@\n" if ($@);
 
 # Set defaults.
 set_default(\%config, "lockfile", "/var/run/rsnap.lock");
@@ -86,12 +86,12 @@ set_default(\%config, "rm_program", "rm");
 
 # If forcing, don't create a progress file, we don't want to overwrite
 # the file of another rsnap process.
-if ($force_on) {
+if ($opt_force_on) {
   $config{progress_file} = "";
 }
 
 # Apply options given on the command line.
-for my $option (@options) {
+for my $option (@opt_options) {
   if ($option =~ /^([^=]*)=(.*)$/) {
     my $opt = $1;
     my $arg = $2;
@@ -103,7 +103,7 @@ for my $option (@options) {
 }
 
 # Check if already running.
-if ($force_on) {
+if ($opt_force_on) {
   $config{lockfile} = "";
 } else {
   if (-f $config{lockfile}) {
@@ -123,14 +123,14 @@ my @finished_jobs : shared;
 for my $h (keys %hosts) {
   my $host = $hosts{$h};
 
-  if (!$all_on) {
+  if (!$opt_all_on) {
 
     my $skip = 1;
 
     # If we have groups selected, check if this host belongs to one of
     # the selected groups.
-    if (0 != scalar @groups) {
-      for my $group (@groups) {
+    if (0 != scalar @opt_groups) {
+      for my $group (@opt_groups) {
 	if (defined($host->{"group"}) && ($host->{"group"} eq $group)) {
 	  $skip = 0;
 	  last;
@@ -400,13 +400,13 @@ open OK, ">".$config{"okfile"};
 close OK;
 
 # Call after_all_backup_hook if defined.
-if ($all_on && defined $config{after_all_backup_hook}) {
+if ($opt_all_on && defined $config{after_all_backup_hook}) {
   call_hook($config{after_all_backup_hook});
 }
 
 my @cleanup_dirs : shared;
 
-if (!$no_cleanup) {
+if (!$opt_no_cleanup) {
   # Clean up
   foreach my $h (sort keys %scheduled_hosts) {
     push @cleanup_dirs, $scheduled_hosts{$h}{"dir"};
@@ -426,7 +426,7 @@ if (!$no_cleanup) {
   }
   
   # Call during_all_cleanup_hook if defined.
-  if ($all_on && defined $config{during_all_cleanup_hook}) {
+  if ($opt_all_on && defined $config{during_all_cleanup_hook}) {
     call_hook($config{during_all_cleanup_hook});
   }
   
@@ -440,7 +440,7 @@ if (!$no_cleanup) {
   }
 
   # Call after_all_cleanup_hook if defined.
-  if ($all_on && defined $config{after_all_cleanup_hook}) {
+  if ($opt_all_on && defined $config{after_all_cleanup_hook}) {
     call_hook($config{after_all_cleanup_hook});
   }
 }
@@ -470,7 +470,7 @@ sub debug
 {
   my ($message) = @_;
 
-  if ($debug_on) {
+  if ($opt_debug_on) {
     print $message;
   }
 }
