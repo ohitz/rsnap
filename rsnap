@@ -960,6 +960,9 @@ sub backup
   print INFO "Filter:\n";
   print INFO $job->{filter};
   print INFO "\n";
+  print INFO "rsync command:\n";
+  print INFO "$rsync_command\n";
+  print INFO "\n";
   close INFO;
 
   # Execute command
