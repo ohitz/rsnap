@@ -107,6 +107,11 @@ if ($opt_force_on) {
   $config{lockfile} = "";
 } else {
   if (-f $config{lockfile}) {
+    # When all is selected, send a mail so the admin is alerted.
+    if ($opt_all_on) {
+      send_backup_report("\nNot starting rsnap because it is still running.\n");
+    }
+    
     printf STDERR ("Lock file '%s' exists, is rsnap already running?\n",
 		   $config{lockfile});
     exit 1;
