@@ -231,69 +231,84 @@ for my $h (keys %hosts) {
 
   my @filters;
 
+  if ($host->{parallel_path} ne "") {
+    $host->{parallel_paths} = [ $host->{parallel_path} ];
+  }
+
   # If parallel_path is configured, define filters so that the
   # contents of these path is backed up in parallel.
-  if ($host->{parallel_path} ne "") {
-    my $parallel_path = $host->{parallel_path};
-
-    # Strip trailing slash.
-    $parallel_path =~ s/\/$//;
-
-    my $parallel_dir = $snapshot_dir."/".$parallel_path;
-
+  if ($host->{ parallel_paths } && 0 != scalar @{ $host->{parallel_paths} }) {
     my @subdirs;
 
-    if (-d $parallel_dir) {
-      opendir(DIR, $parallel_dir);
-      while (my $entry = readdir(DIR)) {
-	if ($entry eq "." || $entry eq "..") {
-	  next;
-	}
-	if (! -d $parallel_dir."/".$entry) {
-	  next;
-	}
+    # Enumerate all subdirectories already backed up.
+    foreach my $parallel_path (@{ $host->{parallel_paths} }) {
+      # Strip trailing slash.
+      $parallel_path =~ s/\/$//;
 
-	push @subdirs, $entry;
-      }
-      closedir DIR;
+      my $parallel_dir = $snapshot_dir."/".$parallel_path;
 
-      # Create the filters.
-      foreach my $entry (@subdirs) {
-	my $filter = {
-	  "part" => "part-$entry",
-	  "expr" => ""
-	};
-
-	foreach my $dirpart (dirparts($parallel_path)) {
-	  $filter->{expr} .= "+ $dirpart/\n";
-	}
-
-	$filter->{expr} .= "+ $parallel_path/$entry/\n";
-
-	foreach my $e (@subdirs) {
-	  if ($entry ne $e) {
-	    $filter->{expr} .= "- $parallel_path/$e/\n";
-	  }
-	}
-
-	foreach my $dirpart (reverse dirparts($parallel_path)) {
-	  $filter->{expr} .= "- $dirpart/*\n";
-	}
-	$filter->{expr} .= "- /*\n";
-
-	push @filters, $filter;
-      }
-
-      # Create filter taking care of the rest.
+      if (-d $parallel_dir) {
+        opendir(DIR, $parallel_dir);
+        while (my $entry = readdir(DIR)) {
+          if ($entry eq "." || $entry eq "..") {
+            next;
+          }
+          if (! -d $parallel_dir."/".$entry) {
+            next;
+          }
+          
+          push @subdirs, $parallel_path."/".$entry;
+        }
+        closedir DIR;
+      }      
+    }
+    
+    # Create filters for each subdirectory to be backed up in
+    # parallel.
+    foreach my $subdir (sort @subdirs) {
+      my $entry = $subdir;
+      $entry =~ s/[\/\ ]/_/g;
+            
       my $filter = {
-	"part" => "rest",
-	"expr" => ""
+        "part" => "part-$entry",
+        "expr" => ""
       };
-      foreach my $entry (@subdirs) {
-	$filter->{expr} .= "- $parallel_path/$entry/\n";
+
+      my $parent = dirname($subdir);
+
+      # Include directories from the root to the current subdirectory.
+      foreach my $dirpart (dirparts($subdir)) {
+        $filter->{expr} .= "+ $dirpart/\n";
       }
+
+      # Exclude all directories next to the current subdirectory.
+      foreach my $dir (sort @subdirs) {
+        if ($dir =~ /^$parent/) {
+          if ($subdir ne $dir) {
+            $filter->{expr} .= "- $dir/\n";
+          }
+        }
+      }
+
+      # Exclude content of included parent directories.
+      foreach my $dirpart (reverse dirparts($parent)) {
+        $filter->{expr} .= "- $dirpart/*\n";
+      }
+      $filter->{expr} .= "- /*\n";
+
       push @filters, $filter;
     }
+
+    # Create filter taking care of the rest.
+    my $filter = {
+      "part" => "rest",
+      "expr" => ""
+    };
+    foreach my $subdir (@subdirs) {
+      $filter->{expr} .= "- $subdir/\n";
+    }
+
+    push @filters, $filter;
   }
 
   if (0 == scalar @filters) {
