@@ -474,8 +474,10 @@ exit 0;
 
 sub cleanup
 {
+  # Wait for the progress thread to finish.
   if (%progress) {
     $progress{quit} = 1;
+    $progress_threads->join();
   }
 
   if ($config{lockfile} ne "" && -f $config{lockfile}) {
@@ -483,11 +485,6 @@ sub cleanup
   }
   if ($config{progress_file} ne "" && -f $config{progress_file}) {
     unlink($config{progress_file});
-  }
-
-  # Wait for the progress thread to finish.
-  if (defined $progress_threads) {
-    $progress_threads->join();
   }
 }
 
