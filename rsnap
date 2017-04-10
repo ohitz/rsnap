@@ -120,6 +120,20 @@ if ($opt_force_on) {
   close LOCK;
 }
 
+my $rsnap_lock : shared;
+
+# Prepare progress structure.
+my %progress : shared;
+
+$progress{phase} = "Initializing";
+$progress{hosts_total} = 0;
+$progress{hosts_done} = 0;
+$progress{jobs_total} = 0;
+$progress{jobs_done} = 0;
+
+# Start the progress thread
+my $progress_threads = threads->create("progress_thread");
+
 # Create the backup hosts and jobs structure.
 my %scheduled_hosts : shared;
 my @scheduled_jobs : shared;
@@ -355,19 +369,8 @@ if (0 == scalar @scheduled_jobs) {
 # Sort the jobs by duration (longest job first).
 @scheduled_jobs = sort { $b->{"last_duration"} <=> $a->{"last_duration"} } @scheduled_jobs;
 
-# Prepare progress structure.
-my %progress : shared;
-
-$progress{phase} = "Initializing";
 $progress{hosts_total} = scalar values %scheduled_hosts;
-$progress{hosts_done} = 0;
 $progress{jobs_total} = scalar @scheduled_jobs;
-$progress{jobs_done} = 0;
-
-my $rsnap_lock : shared;
-
-# Start the progress thread
-my $progress_threads = threads->create("progress_thread");
 
 # Start the backup threads
 set_phase("Backing up (done %a/%b hosts, %c/%d jobs)");
@@ -465,21 +468,26 @@ if (!$opt_no_cleanup) {
   }
 }
 
-# Wait for the progress_thread to finish.
-$progress{quit} = 1;
-$progress_threads->join();
-
 cleanup();
 
 exit 0;
 
 sub cleanup
 {
+  if (%progress) {
+    $progress{quit} = 1;
+  }
+
   if ($config{lockfile} ne "" && -f $config{lockfile}) {
     unlink $config{lockfile};
   }
   if ($config{progress_file} ne "" && -f $config{progress_file}) {
     unlink($config{progress_file});
+  }
+
+  # Wait for the progress thread to finish.
+  if (defined $progress_threads) {
+    $progress_threads->join();
   }
 }
 
