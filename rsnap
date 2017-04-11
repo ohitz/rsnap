@@ -295,16 +295,7 @@ for my $h (keys %hosts) {
         $filter->{expr} .= "+ $dirpart/\n";
       }
 
-      # Exclude all directories next to the current subdirectory.
-      foreach my $dir (sort @subdirs) {
-        if ($dir =~ /^$parent/) {
-          if ($subdir ne $dir) {
-            $filter->{expr} .= "- $dir/\n";
-          }
-        }
-      }
-
-      # Exclude content of included parent directories.
+      # Exclude the rest.
       foreach my $dirpart (reverse dirparts($parent)) {
         $filter->{expr} .= "- $dirpart/*\n";
       }
