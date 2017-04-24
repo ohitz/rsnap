@@ -5,8 +5,8 @@
 use POSIX qw(strftime);
 use Getopt::Long;
 use File::Basename;
-use threads;
-use threads::shared;
+use forks;
+use forks::shared;
 use strict;
 
 my $opt_all_on;
