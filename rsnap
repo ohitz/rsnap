@@ -791,16 +791,18 @@ sub backup_job_done
     } else {
       $host->{"error_messages"} .= " exit status ".$status."\n";
     }
+  } else {
+    # Store duration only if the job was successful. Otherwise leave
+    # the file in place and don't overwrite it.
+    store_last_duration($job);
   }
-
+  
   printf
       "%s (%s) done: status=%d, duration=%s\n",
       $job->{hostname},
       $job->{part},
       $status,
       format_duration($duration);
-
-  store_last_duration($job);
 
   # Push the finished job into the "finished_jobs" queue.
   push @finished_jobs, $job;
