@@ -1,0 +1,392 @@
+#! /usr/bin/perl
+#
+# Copyright (C) 2017 Oliver Hitz <oliver@net-track.ch>
+#
+
+=head1 NAME
+
+tar-hosts
+
+=head1 SYNOPSIS
+
+tar-hosts [options] I<DUMPDIR>
+
+=head1 OPTIONS AND ARGUMENTS
+
+=over
+
+=item I<DUMPDIR>
+
+Sets the path where data is dumped to.
+
+=item B<--help>
+
+Show help message.
+
+=item B<--debug>
+
+Enables debugging output.
+
+=item B<--dry-run>
+
+Show what commands would be called but don't execute anything. This
+also sets B<--debug>.
+
+=item B<--threads>=I<THREADS> (default: B<4>)
+
+Sets the number of parallel tar threads to run.
+
+=item B<--config>=I<CONFIGURATION FILE PATH> (default: B</etc/rsnap.conf>)
+
+Sets the path to the rsnap.conf configuration file where the different
+hosts are defined. All hosts which have B<ext_tar> set to 1 will be
+dumped by this tool.
+
+=item B<--hosts>=I<HOST1>,I<HOST2>,...
+
+Only dump the indicated host(s).
+
+=item B<--all>
+
+Dump all hosts found in the B<snap> configuration file, except for
+those which have B<ext_tar> set to 0. If B<--all> is not specified,
+only hosts which have B<ext_tar> set to 1 will be dumped.
+
+=item B<--rotations>=I<ROTATIONS> (default: C<7>)
+
+Sets the number of dumps to keep.
+
+=item B<--dumpdir-name>=I<DUMPDIR-NAME> (default: C<dumps>)
+
+Sets the base name of the directory where the dumps are stored in. Each
+host is stored in
+I<DUMPDIR>/I<DUMPDIR-NAME>.I<YYYYMMDD>/I<HOSTNAME><FILEEXT>
+
+=item B<--fileext>=I<FILEEXT> (default: C<.tar>)
+
+Set the dump file extension.
+
+=item B<--compress> (default: off)
+
+Compress the dump files using B<--compression-program>.
+
+=item B<--compression-program>=I<COMPRESSION-PROGRAM> (default: B<gzip>)
+
+Specifies the compression program to use if B<--compress> is active.
+
+=back
+
+=head1 DESCRIPTION
+
+B<tar-hosts> can be called by B<rsnap> to further back up some data
+after B<rsnap> was run (e.g. to a different remote data store, such as
+a NAS).
+
+B<tar-hosts> uses the B<rsnap> configuration file. To call
+B<tar-hosts> after B<rsnap> finished backing up the hosts, insert
+the following into the configuration file:
+
+    after_all_backup_hook => {
+        command => "/usr/local/rsnap/scripts/tar-hosts /data/nas/",
+        progress => "Storing data to NAS.",
+    }    
+
+To select which hosts to dump, either set B<ext_tar> to 1 or
+specify the B<--all> command line option and exclude unwanted hosts by
+setting B<ext_tar> to 0:
+
+    "server-1.domain.com" => {
+        ext_tar => 1
+    }
+
+=head1 AUTHOR
+
+B<tar-hosts> was written by Oliver Hitz <oliver@net-track.ch>.
+
+=head1 LICENSE
+
+Licensed under The MIT License.
+
+=cut
+
+use feature 'state';
+use strict;
+use POSIX;
+use Cwd 'abs_path';
+use Getopt::Long;
+use IPC::Open3;
+use Pod::Usage;
+use threads;
+use threads::shared;
+
+# Configuration section ------------------------------------------------------
+
+my $cfg_help = 0;
+my $cfg_debug = 0;
+my $cfg_dry_run = 0;
+my $cfg_threads = 4;
+my $cfg_all = 0;
+my @cfg_hosts;
+my $cfg_configfile = "/etc/rsnap.conf";
+my $cfg_rotations = 7;
+my $cfg_dumpdir_name = "dumps";
+my $cfg_fileext = ".tar";
+my $cfg_compress;
+my $cfg_compression_program = "gzip";
+my $cfg_dumppath;
+
+if (!GetOptions( "help" => \$cfg_help,
+                 "debug" => \$cfg_debug,
+                 "dry-run" => \$cfg_dry_run,
+                 "threads=i" => \$cfg_threads,
+                 "all" => \$cfg_all,
+                 "hosts=s" => \@cfg_hosts,
+                 "config=s" => \$cfg_configfile,
+                 "rotations=i" => \$cfg_rotations,
+                 "dumpdir-name=s" => \$cfg_dumpdir_name,
+                 "fileext=s" => \$cfg_fileext,
+                 "compress" => \$cfg_compress,
+                 "compression-program=s" => \$cfg_compression_program) ) {
+  pod2usage(-verbose => 1);
+  exit 1;
+}
+
+if ($cfg_help) {
+  pod2usage(-exitstatus => 0, -verbose => 2);
+  exit 0;
+}
+
+# Set debug if --dry-run is specified.
+if ($cfg_dry_run) {
+  $cfg_debug = 1;
+}
+
+if ($#ARGV != 0) {
+  pod2usage({ -verbose => 1 });
+  exit 1;
+}
+
+@cfg_hosts = split(/,/,join(',',@cfg_hosts));
+
+if ($cfg_all && @cfg_hosts) {
+  error("--all and --hosts cannot be specified at the same time!");
+}
+
+$cfg_dumppath = shift @ARGV;
+
+# Read configuration file.
+my %config;
+my %hosts;
+
+open(FILE, $cfg_configfile) || die "Failed to open $cfg_configfile\n";
+my @lines = <FILE>;
+close(FILE);
+eval("@lines");
+die "Failed to eval() file $cfg_configfile:\n$@\n" if ($@);
+
+# Construct the list of directories to dump.
+my @scheduled_jobs : shared;
+
+for my $hostname (sort keys %hosts) {
+  my $host = $hosts{$hostname};
+
+  my $selected = 0;
+  
+  # Check if marked for dumping.
+  if (@cfg_hosts) {
+    foreach my $h (@cfg_hosts) {
+      if ($h eq $hostname) {
+        $selected = 1;
+        last;
+      }
+    }
+  } elsif ($cfg_all) {
+    if (!defined $host->{ext_tar} || $host->{ext_tar} == 1) {
+      $selected = 1;
+    }
+  } else {
+    if ($host->{ext_tar} == 1) {
+      $selected = 1;
+    }
+  }
+
+  if (!$selected) {
+    next;
+  }
+
+  # Construct path.
+  my $datapath = $config{"snapshot_root"};
+  if (defined($host->{"snapshot_root"})) {
+    $datapath = $host->{"snapshot_root"};
+  }
+  if (defined($host->{"group"})) {
+    $datapath .= "/".$host->{"group"};
+  }
+  $datapath .= "/".$hostname;
+  $datapath .= "/".$config{"archive_name"}.".latest";
+
+  $datapath = abs_path($datapath);
+
+  # Add job to scheduled_jobs.
+  my $i = $#scheduled_jobs+1;
+  $scheduled_jobs[$i] = &share({});
+  $scheduled_jobs[$i]{"group"} = $host->{"group"};
+  $scheduled_jobs[$i]{"hostname"} = $hostname;
+  $scheduled_jobs[$i]{"path"} = $datapath;
+}
+
+# Quit if there are no scheduled jobs.
+if (!@scheduled_jobs) {
+  msg("No hosts to dump.");
+  exit 0;
+}
+
+# Create directory in dumppath.
+my $date_now = strftime "%Y%m%d", localtime;
+my $cfg_dumpdir = sprintf("%s/%s.%s", $cfg_dumppath, $cfg_dumpdir_name, $date_now);
+
+my $cmd = sprintf("mkdir -p %s", $cfg_dumpdir);
+debug("Creating directory $cfg_dumpdir: $cmd\n");
+if (!$cfg_dry_run) {
+  `$cmd`;
+}
+
+# Start the dump threads.
+my $dump_lock : shared;
+
+my @threads = ();
+
+for (my $i = 0; $i < min($cfg_threads, $#scheduled_jobs + 1); $i++) {
+  push @threads, threads->create("dump_thread", $i);
+}
+
+# Wait for the threads to finish.
+for my $thread (@threads) {
+  $thread->join;
+}
+
+# Rotate directories.
+if (opendir my $dh, $cfg_dumppath) {
+  my @entries;
+  
+  while (my $entry = readdir $dh) {
+    if ($entry =~ /^$cfg_dumpdir_name\./ && -d "$cfg_dumppath/$entry") {
+      push @entries, $entry;
+    }
+  }
+
+  @entries = reverse sort @entries;
+  splice @entries, 0, $cfg_rotations;
+
+  # Delete the oldest entries.
+  foreach my $entry (@entries) {
+    my $cmd = sprintf("rm -rf %s/%s", $cfg_dumppath, $entry);
+    debug("Deleting dump directory $entry: $cmd");
+    if (!$cfg_dry_run) {
+      `$cmd`;
+    }
+  }
+}
+
+exit 0;
+
+sub dump_thread
+{
+  my ($thread_number) = @_;
+  debug("Dump thread %d: started.", $thread_number);
+  
+  while (has_dump_jobs()) {
+    my ($job) = next_dump_job($thread_number);
+    if ($job) {
+      debug("Dump thread %d (%s): new job", $thread_number, $job->{hostname});
+
+      my $dumpfile = sprintf("%s/%s%s", $cfg_dumpdir, $job->{hostname}, $cfg_fileext);
+      if (-f $dumpfile) {
+        debug("Dump thread %d (%s): dump file %s already exists.",
+              $thread_number,
+              $job->{hostname},
+              $dumpfile);
+      } else {
+        my $cmd_compress = "";
+        if ($cfg_compress) {
+          $cmd_compress = sprintf("| %s", $cfg_compression_program);
+        }
+        
+        my $cmd = sprintf("tar --numeric-owner -C %s -cf - . %s > %s.tmp",
+                          $job->{path},
+                          $cmd_compress,
+                          $dumpfile);
+
+        debug("Dump thread %d (%s): %s", $thread_number, $job->{hostname}, $cmd);
+
+        if (!$cfg_dry_run) {
+          open3(\*IN, \*OUT, \*ERR, $cmd);
+          my $result = "";
+          while (my $line = <ERR>) {
+            chomp($line);
+            $result .= $line;
+            msg("Dump thread %d (%s): %s", $thread_number, $job->{hostname}, $line);
+          }
+          close(ERR);
+
+          rename $dumpfile.".tmp", $dumpfile;
+        }
+      }
+      
+      debug("Dump thread %d (%s): finished job ", $thread_number, $job->{hostname});
+    }
+  }
+}
+
+sub next_dump_job
+{
+  lock($dump_lock);
+  my ($thread_number) = @_;
+
+  my $job = shift @scheduled_jobs;
+  return $job;
+}
+
+sub has_dump_jobs
+{
+  lock($dump_lock);
+  return $#scheduled_jobs >= 0;
+}
+
+sub min($$)
+{
+  $_[$_[0] > $_[1]]
+}
+
+# ----------------------------------------------------------------------------
+# Output a debug message.
+#
+sub debug
+{
+  my $msg = shift;
+  my (@args) = @_;  
+  if ($cfg_debug) {
+    printf "%s\n", sprintf($msg, @args);
+  }
+}
+
+sub msg
+{
+  my $msg = shift;
+  my (@args) = @_;  
+  printf "%s\n", sprintf($msg, @args);
+}
+
+sub warning
+{
+  my $msg = shift;
+  my (@args) = @_;  
+  printf STDERR "WARNING: %s\n", sprintf($msg, @args);
+}
+
+sub error
+{
+  my $msg = shift;
+  my (@args) = @_;  
+  printf STDERR "ERROR: %s\n", sprintf($msg, @args);
+}
