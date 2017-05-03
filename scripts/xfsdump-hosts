@@ -146,7 +146,7 @@ if (!GetOptions( "help" => \$cfg_help,
                  "config=s" => \$cfg_configfile,
                  "rotations=i" => \$cfg_rotations,
                  "dumpdir-name=s" => \$cfg_dumpdir_name,
-                 "fileext" => \$cfg_fileext,
+                 "fileext=s" => \$cfg_fileext,
                  "compress" => \$cfg_compress,
                  "compression-program=s" => \$cfg_compression_program) ) {
   pod2usage(-verbose => 1);
