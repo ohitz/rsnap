@@ -7,11 +7,13 @@ use Getopt::Long;
 use File::Basename;
 use forks;
 use forks::shared;
+use JSON;
 use strict;
 
 my $opt_all_on;
 my $opt_debug_on;
 my $opt_force_on;
+my $opt_simulate_on;
 my $opt_no_cleanup;
 my $opt_configfile = "/etc/rsnap.conf";
 my @opt_groups;
@@ -25,6 +27,7 @@ $SIG{INT} = sub {
 if (!GetOptions( "all" => \$opt_all_on,
 		 "debug" => \$opt_debug_on,
 		 "force" => \$opt_force_on,
+		 "simulate" => \$opt_simulate_on,
                  "no-cleanup" => \$opt_no_cleanup,
 		 "config=s" => \$opt_configfile,
 		 "group=s" => \@opt_groups,
@@ -108,7 +111,7 @@ if ($opt_force_on) {
 } else {
   if (-f $config{lockfile}) {
     # When all is selected, send a mail so the admin is alerted.
-    if ($opt_all_on) {
+    if (!$opt_simulate_on && $opt_all_on) {
       send_backup_report("\nNot starting rsnap because it is still running.\n");
     }
     
@@ -125,7 +128,7 @@ my $rsnap_lock : shared;
 # Prepare progress structure.
 my %progress : shared;
 
-$progress{phase} = "Initializing";
+$progress{phase} = "Initializing (%b hosts, %d jobs)";
 $progress{hosts_total} = 0;
 $progress{hosts_done} = 0;
 $progress{jobs_total} = 0;
@@ -134,222 +137,14 @@ $progress{jobs_done} = 0;
 # Start the progress thread
 my $progress_threads = threads->create("progress_thread");
 
-# Create the backup hosts and jobs structure.
+# Data structure holding information about the individual hosts.
 my %scheduled_hosts : shared;
-my @scheduled_jobs : shared;
-my @finished_jobs : shared;
 
-for my $h (keys %hosts) {
-  my $host = $hosts{$h};
+# Data structure holding information about each backup job.
+my @scheduled_jobs;
 
-  if (!$opt_all_on) {
-
-    my $skip = 1;
-
-    # If we have groups selected, check if this host belongs to one of
-    # the selected groups.
-    if (0 != scalar @opt_groups) {
-      for my $group (@opt_groups) {
-	if (defined($host->{"group"}) && ($host->{"group"} eq $group)) {
-	  $skip = 0;
-	  last;
-	}
-      }
-    }
-
-    # If hosts are selected, check if the current one is among the
-    # selected ones.
-    if (defined($rsnap_hosts{$h})) {
-      $skip = 0;
-    }
-
-    if ($skip) {
-      next;
-    }
-  }
-
-  # Check weekday if the current host is supposed only to be backed
-  # up on specific days.
-  if (defined($host->{"weekdays"})) {
-    if (!grep /$started_weekday/, @{ $host->{weekdays} }) {
-      # Don't run host on the current weekday
-      next;
-    }
-  }
-
-  # Create the host structure.
-  $scheduled_hosts{$h} = &share({});
-  $scheduled_hosts{$h}{"hostname"} = $h;
-
-  if (defined $host->{"host_parallel"}) {
-    $scheduled_hosts{$h}{"host_parallel"} = $host->{"host_parallel"};
-  } else {
-    $scheduled_hosts{$h}{"host_parallel"} = $config{"host_parallel"};
-  }
-  if (defined $host->{"rotate"}) {
-    $scheduled_hosts{$h}{"rotate"} = $host->{"rotate"};
-  } else {
-    $scheduled_hosts{$h}{"rotate"} = $config{"rotate"};
-  }
-  if (defined $host->{"exclude"}) {
-    $scheduled_hosts{$h}{"exclude"} = $host->{"exclude"};
-  } else {
-    $scheduled_hosts{$h}{"exclude"} = $config{"exclude"};
-  }
-  if (!defined($host->{"snapshot_root"})) {
-    $host->{"snapshot_root"} = $config{"snapshot_root"};
-  }
-  if (defined $host->{"group"}) {
-    $scheduled_hosts{$h}{"dir"} = $host->{"snapshot_root"}."/".$host->{"group"}."/".$h;
-    $scheduled_hosts{$h}{"group"} = $host->{"group"};
-  } else {
-    $scheduled_hosts{$h}{"dir"} = $host->{"snapshot_root"}."/".$h;
-    $scheduled_hosts{$h}{"group"} = "";
-  }
-  if (defined $host->{rsync_options}) {
-    $scheduled_hosts{$h}{rsync_options} = $host->{rsync_options};
-  } else {
-    $scheduled_hosts{$h}{rsync_options} = $config{rsync_options};
-  }
-
-  # Hook executed after this host has been backed up.
-  my $hook;
-  if (defined($host->{after_host_backup_hook})) {
-    $hook = $host->{after_host_backup_hook};
-  } elsif (defined $config{after_host_backup_hook}) {
-    $hook = $config{after_host_backup_hook};
-  }
-  if (defined $hook) {
-    $scheduled_hosts{$h}{after_host_backup_hook} = &share({});
-    $scheduled_hosts{$h}{after_host_backup_hook}{command} = $hook->{command};
-    $scheduled_hosts{$h}{after_host_backup_hook}{progress} = $hook->{progress};
-    $scheduled_hosts{$h}{after_host_backup_hook}{email_to} = $hook->{email_to};
-    $scheduled_hosts{$h}{after_host_backup_hook}{email_from} = $hook->{email_from};
-    $scheduled_hosts{$h}{after_host_backup_hook}{email_subject} = $hook->{email_subject};
-  }
-
-  $scheduled_hosts{$h}{"initialized"} = undef;
-
-  $scheduled_hosts{$h}{"errors"} = 0;
-  $scheduled_hosts{$h}{"error_messages"} = "";
-
-  $scheduled_hosts{$h}{"files_total"} = 0;
-  $scheduled_hosts{$h}{"files_sent"} = 0;
-  $scheduled_hosts{$h}{"bytes_total"} = 0;
-  $scheduled_hosts{$h}{"bytes_sent"} = 0;
-  $scheduled_hosts{$h}{"duration"} = 0;
-
-  $scheduled_hosts{$h}{"jobs"} = 0;
-
-  my $snapshot_dir = $scheduled_hosts{$h}{"dir"}."/".$config{"archive_name"}.".latest";
-
-  my @filters;
-
-  if ($host->{parallel_path} ne "") {
-    $host->{parallel_paths} = [ $host->{parallel_path} ];
-  }
-
-  # If parallel_path is configured, define filters so that the
-  # contents of these path is backed up in parallel.
-  if ($host->{ parallel_paths } && 0 != scalar @{ $host->{parallel_paths} }) {
-    my @subdirs;
-
-    # Enumerate all subdirectories already backed up.
-    foreach my $parallel_path (@{ $host->{parallel_paths} }) {
-      # Strip trailing slash.
-      $parallel_path =~ s/\/$//;
-
-      my $parallel_dir = $snapshot_dir."/".$parallel_path;
-
-      if (-d $parallel_dir) {
-        opendir(DIR, $parallel_dir);
-        while (my $entry = readdir(DIR)) {
-          if ($entry eq "." || $entry eq "..") {
-            next;
-          }
-          if (! -d $parallel_dir."/".$entry) {
-            next;
-          }
-          
-          push @subdirs, $parallel_path."/".$entry;
-        }
-        closedir DIR;
-      }      
-    }
-    
-    # Create filters for each subdirectory to be backed up in
-    # parallel.
-    foreach my $subdir (sort @subdirs) {
-      my $entry = $subdir;
-      $entry =~ s/[\/\ ]/_/g;
-            
-      my $filter = {
-        "part" => "part-$entry",
-        "expr" => ""
-      };
-
-      my $parent = dirname($subdir);
-
-      # Include directories from the root to the current subdirectory.
-      foreach my $dirpart (dirparts($subdir)) {
-        $filter->{expr} .= "+ $dirpart/\n";
-      }
-
-      # Exclude the rest.
-      foreach my $dirpart (reverse dirparts($parent)) {
-        $filter->{expr} .= "- $dirpart/*\n";
-      }
-      $filter->{expr} .= "- /*\n";
-
-      push @filters, $filter;
-    }
-
-    # Create filter taking care of the rest.
-    my $filter = {
-      "part" => "rest",
-      "expr" => ""
-    };
-    foreach my $subdir (@subdirs) {
-      $filter->{expr} .= "- $subdir/\n";
-    }
-
-    push @filters, $filter;
-  }
-
-  if (0 == scalar @filters) {
-    # Only one job, backup the entire host.
-    my $j = $#scheduled_jobs+1;
-    $scheduled_jobs[$j] = &share({});
-    $scheduled_jobs[$j]{"hostname"} = $h;
-    $scheduled_jobs[$j]{"part"} = "full";
-    $scheduled_jobs[$j]{"part_quoted"} = "full";
-    $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
-    $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
-    $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
-
-    $scheduled_hosts{$h}{"jobs"}++;
-
-    debug("Scheduling job for host $h\n");
-  } else {
-    # Iterate through the filters.
-    foreach my $f (@filters) {
-      my $j = $#scheduled_jobs+1;
-      $scheduled_jobs[$j] = &share({});
-      $scheduled_jobs[$j]{"hostname"} = $h;
-      $scheduled_jobs[$j]{"part"} = $f->{part};
-      $scheduled_jobs[$j]{"part_quoted"} = $f->{part};
-      $scheduled_jobs[$j]{"part_quoted"} =~ s/\ /_/g;
-      $scheduled_jobs[$j]{"dir"} = $scheduled_hosts{$h}{"dir"};
-      $scheduled_jobs[$j]{"filter"} = $f->{expr};
-      $scheduled_jobs[$j]{"last_duration"} = get_last_duration($scheduled_jobs[$j]);
-      $scheduled_jobs[$j]{"exclude"} = $scheduled_hosts{$h}{"exclude"};
-
-      $scheduled_hosts{$h}{"jobs"}++;
-
-      debug("Scheduling job for host $h (".$f->{part}.")\n");
-    }
-  }
-}
+# Prepare all jobs.
+schedule_jobs();
 
 if (0 == scalar @scheduled_jobs) {
   printf STDERR ("No hosts selected. Choose `--all', `--group' or individual hosts.\n");
@@ -357,11 +152,13 @@ if (0 == scalar @scheduled_jobs) {
   exit 1;
 }
 
-# Sort the jobs by duration (longest job first).
-@scheduled_jobs = sort { $b->{"last_duration"} <=> $a->{"last_duration"} } @scheduled_jobs;
+# Make the list of scheduled jobs available to all threads.
+share(@scheduled_jobs);
 
 $progress{hosts_total} = scalar values %scheduled_hosts;
 $progress{jobs_total} = scalar @scheduled_jobs;
+
+debug("Prepared $progress{jobs_total} jobs on $progress{hosts_total} hosts.\n");
 
 # Start the backup threads
 set_phase("Backing up (done %a/%b hosts, %c/%d jobs)");
@@ -381,49 +178,55 @@ for (my $i = 0; $i < $config{threads}; $i++) {
 }
 
 # Finalize the backups.
-foreach my $host (values %scheduled_hosts) {
-  backup_finalize($host);
-}
-
-my $report = create_backup_report();
-
-if ($config{"reports_dir"}) {
-  my $reports_dir = $config{"reports_dir"};
-  if (-d $reports_dir) {
-    my $report_name = sprintf("rsnap.%s.txt", strftime("%Y%m%d-%H%M%S", localtime($started)));
-
-    if (open REPORT, ">".$reports_dir."/".$report_name) {
-      print REPORT $report;
-      close REPORT;
-    } else {
-      printf STDERR ("Cannot write report to `%s/%s'.\n", $reports_dir, $report_name);
-    }
-  } else {
-    printf STDERR ("reports_dir `%s' is not a directory.\n", $reports_dir);
+if (!$opt_simulate_on) {
+  foreach my $host (values %scheduled_hosts) {
+    backup_finalize($host);
   }
 }
 
-# Create backup report.
-send_backup_report($report);
+if (!$opt_simulate_on) {
+  my $report = create_backup_report();
+
+  if ($config{"reports_dir"}) {
+    my $reports_dir = $config{"reports_dir"};
+    if (-d $reports_dir) {
+      my $report_name = sprintf("rsnap.%s.txt", strftime("%Y%m%d-%H%M%S", localtime($started)));
+      
+      if (open REPORT, ">".$reports_dir."/".$report_name) {
+        print REPORT $report;
+        close REPORT;
+      } else {
+        printf STDERR ("Cannot write report to `%s/%s'.\n", $reports_dir, $report_name);
+      }
+    } else {
+      printf STDERR ("reports_dir `%s' is not a directory.\n", $reports_dir);
+    }
+  }
+  
+  # Create backup report.
+  send_backup_report($report);
+}
 
 # Create the "okfile" once the backup is done.
-if (-f $config{"okfile"}) {
-  unlink $config{"okfile"};
+if (!$opt_simulate_on) {
+  if (-f $config{"okfile"}) {
+    unlink $config{"okfile"};
+  }
+  open OK, ">".$config{"okfile"};
+  close OK;
 }
-open OK, ">".$config{"okfile"};
-close OK;
 
 # Call after_all_backup_hook if defined.
-if ($opt_all_on && defined $config{after_all_backup_hook}) {
+if (!$opt_simulate_on && $opt_all_on && defined $config{after_all_backup_hook}) {
   call_hook($config{after_all_backup_hook});
 }
 
 my @cleanup_dirs : shared;
 
-if (!$opt_no_cleanup) {
+if (!$opt_simulate_on && !$opt_no_cleanup) {
   # Clean up
   foreach my $h (sort keys %scheduled_hosts) {
-    push @cleanup_dirs, $scheduled_hosts{$h}{"dir"};
+    push @cleanup_dirs, $scheduled_hosts{$h}{dir};
   }
   
   set_phase("Cleaning up (done %a/%b hosts)");
@@ -492,6 +295,250 @@ sub debug
 }
 
 # ----------------------------------------------------------------------------
+# Quote part name so it gives a valid filename.
+#
+sub quotepart
+{
+  my $p = shift;
+  $p =~ s/\ /_/g;
+  return $p;
+}
+
+# ----------------------------------------------------------------------------
+# Schedule the backup jobs.
+#
+sub schedule_jobs
+{
+  my @jobs;
+  
+  for my $h (keys %hosts) {
+    my $host = $hosts{$h};
+    
+    if (!$opt_all_on) {
+      
+      my $skip = 1;
+      
+      # If we have groups selected, check if this host belongs to one of
+      # the selected groups.
+      if (0 != scalar @opt_groups) {
+        for my $group (@opt_groups) {
+          if (defined($host->{"group"}) && ($host->{"group"} eq $group)) {
+            $skip = 0;
+            last;
+          }
+        }
+      }
+      
+      # If hosts are selected, check if the current one is among the
+      # selected ones.
+      if (defined($rsnap_hosts{$h})) {
+        $skip = 0;
+      }
+      
+      if ($skip) {
+        next;
+      }
+    }
+    
+    # Check weekday if the current host is supposed only to be backed
+    # up on specific days.
+    if (defined($host->{"weekdays"})) {
+      if (!grep /$started_weekday/, @{ $host->{weekdays} }) {
+        # Don't run host on the current weekday
+        next;
+      }
+    }
+    
+    # Create the host structure.
+    $scheduled_hosts{$h} = &share({});
+    $scheduled_hosts{$h}{"hostname"} = $h;
+    
+    if (defined $host->{"host_parallel"}) {
+      $scheduled_hosts{$h}{"host_parallel"} = $host->{"host_parallel"};
+    } else {
+      $scheduled_hosts{$h}{"host_parallel"} = $config{"host_parallel"};
+    }
+    if (defined $host->{"rotate"}) {
+      $scheduled_hosts{$h}{"rotate"} = $host->{"rotate"};
+    } else {
+      $scheduled_hosts{$h}{"rotate"} = $config{"rotate"};
+    }
+    if (defined $host->{"exclude"}) {
+      $scheduled_hosts{$h}{"exclude"} = $host->{"exclude"};
+    } else {
+      $scheduled_hosts{$h}{"exclude"} = $config{"exclude"};
+    }
+    if (!defined($host->{"snapshot_root"})) {
+      $host->{"snapshot_root"} = $config{"snapshot_root"};
+    }
+    if (defined $host->{"group"}) {
+      $scheduled_hosts{$h}{dir} = $host->{"snapshot_root"}."/".$host->{"group"}."/".$h;
+      $scheduled_hosts{$h}{"group"} = $host->{"group"};
+    } else {
+      $scheduled_hosts{$h}{dir} = $host->{"snapshot_root"}."/".$h;
+      $scheduled_hosts{$h}{"group"} = "";
+    }
+    if (defined $host->{rsync_options}) {
+      $scheduled_hosts{$h}{rsync_options} = $host->{rsync_options};
+    } else {
+      $scheduled_hosts{$h}{rsync_options} = $config{rsync_options};
+    }
+    
+    # Hook executed after this host has been backed up.
+    my $hook;
+    if (defined($host->{after_host_backup_hook})) {
+      $hook = $host->{after_host_backup_hook};
+    } elsif (defined $config{after_host_backup_hook}) {
+      $hook = $config{after_host_backup_hook};
+    }
+    if (defined $hook) {
+      $scheduled_hosts{$h}{after_host_backup_hook} = &share({});
+      $scheduled_hosts{$h}{after_host_backup_hook}{command} = $hook->{command};
+      $scheduled_hosts{$h}{after_host_backup_hook}{progress} = $hook->{progress};
+      $scheduled_hosts{$h}{after_host_backup_hook}{email_to} = $hook->{email_to};
+      $scheduled_hosts{$h}{after_host_backup_hook}{email_from} = $hook->{email_from};
+      $scheduled_hosts{$h}{after_host_backup_hook}{email_subject} = $hook->{email_subject};
+    }
+    
+    $scheduled_hosts{$h}{"initialized"} = undef;
+    
+    $scheduled_hosts{$h}{"errors"} = 0;
+    $scheduled_hosts{$h}{"error_messages"} = "";
+    
+    $scheduled_hosts{$h}{"files_total"} = 0;
+    $scheduled_hosts{$h}{"files_sent"} = 0;
+    $scheduled_hosts{$h}{"bytes_total"} = 0;
+    $scheduled_hosts{$h}{"bytes_sent"} = 0;
+    $scheduled_hosts{$h}{"duration"} = 0;
+    
+    $scheduled_hosts{$h}{"jobs"} = 0;
+    
+    my $snapshot_dir = $scheduled_hosts{$h}{dir}."/".$config{"archive_name"}.".latest";
+    
+    my @filters;
+    
+    if ($host->{parallel_path} ne "") {
+      $host->{parallel_paths} = [ $host->{parallel_path} ];
+    }
+    
+    # If parallel_path is configured, define filters so that the
+    # contents of these path is backed up in parallel.
+    if ($host->{ parallel_paths } && 0 != scalar @{ $host->{parallel_paths} }) {
+      my @subdirs;
+      
+      # Enumerate all subdirectories already backed up.
+      foreach my $parallel_path (@{ $host->{parallel_paths} }) {
+        # Strip trailing slash.
+        $parallel_path =~ s/\/$//;
+        
+        my $parallel_dir = $snapshot_dir."/".$parallel_path;
+        
+        if (-d $parallel_dir) {
+          opendir(DIR, $parallel_dir);
+          while (my $entry = readdir(DIR)) {
+            if ($entry eq "." || $entry eq "..") {
+              next;
+            }
+            if (! -d $parallel_dir."/".$entry) {
+              next;
+            }
+            
+            push @subdirs, $parallel_path."/".$entry;
+          }
+          closedir DIR;
+        }      
+      }
+      
+      # Create filters for each subdirectory to be backed up in
+      # parallel.
+      foreach my $subdir (sort @subdirs) {
+        my $entry = $subdir;
+        $entry =~ s/[\/\ ]/_/g;
+        
+        my $filter = {
+          "part" => "part-$entry",
+          "expr" => ""
+        };
+        
+        my $parent = dirname($subdir);
+        
+        # Include directories from the root to the current subdirectory.
+        foreach my $dirpart (dirparts($subdir)) {
+          $filter->{expr} .= "+ $dirpart/\n";
+        }
+        
+        # Exclude the rest.
+        foreach my $dirpart (reverse dirparts($parent)) {
+          $filter->{expr} .= "- $dirpart/*\n";
+        }
+        $filter->{expr} .= "- /*\n";
+        
+        push @filters, $filter;
+      }
+      
+      # Create filter taking care of the rest.
+      my $filter = {
+        "part" => "rest",
+        "expr" => ""
+      };
+      foreach my $subdir (@subdirs) {
+        $filter->{expr} .= "- $subdir/\n";
+      }
+      
+      push @filters, $filter;
+    }
+    
+    if (0 == scalar @filters) {
+      my $job = {
+        hostname => $h,
+        part => "full",
+        last_duration => get_last_duration($scheduled_hosts{$h}{dir}, "full"),
+      };
+      push @jobs, $job;
+      
+      $scheduled_hosts{$h}{"jobs"}++;
+
+      $progress{jobs_total}++;
+      $progress{hosts_total}++;
+
+      debug("Scheduling job for host $h\n");
+    } else {
+      my $host_dir = $scheduled_hosts{$h}{dir};
+      my $num_jobs = 0;
+      
+      # Iterate through the filters.
+      foreach my $f (@filters) {
+        my $job = {
+          hostname => $h,
+          part => $f->{part},
+          last_duration => get_last_duration($host_dir, $f->{part}),
+          filter => $f->{expr}
+        };
+        push @jobs, $job;
+        
+        $num_jobs++;
+        
+        debug("Scheduling job for host $h (".$f->{part}.")\n");
+      }
+      
+      $scheduled_hosts{$h}{"jobs"} += $num_jobs;
+
+      $progress{jobs_total} += $num_jobs;
+      $progress{hosts_total}++;
+    }
+  }
+
+  # Sort the jobs by duration (longest job first).
+  @jobs = sort { $b->{"last_duration"} <=> $a->{"last_duration"} } @jobs;
+
+  # Encode each job into JSON format and store it in scheduled_jobs.
+  # JSON, because sharing an array of hashes is very slow and
+  # memory-intensive in perl. This way, we get an array of JSON
+  # objects which we have to decode before using them.
+  @scheduled_jobs = map { encode_json($_) } @jobs;
+}
+
+# ----------------------------------------------------------------------------
 # The progress thread.
 #
 sub progress_thread
@@ -537,7 +584,13 @@ sub backup_thread
       $progress{"thr_start_".$thread_number} = $start;
       $progress{"thr_last_".$thread_number} = $job->{last_duration};
 
-      my ($status, $files_total, $files_sent, $bytes_total, $bytes_sent) = backup($job, $tempdir);
+      my $status = 0;
+      my $files_total = 0;
+      my $files_sent = 0;
+      my $bytes_total = 0;
+      my $bytes_sent = 0;
+
+      ($status, $files_total, $files_sent, $bytes_total, $bytes_sent) = backup($job, $tempdir);
 
       my $duration = time() - $start;
       debug("Backup thread $thread_number: finished job in $duration seconds.\n");
@@ -594,9 +647,9 @@ sub cleanup_thread
 #
 sub get_last_duration
 {
-  my ($job) = @_;
+  my ($dir, $part) = @_;
 
-  my $lddir = $job->{"dir"}."/.rsnap";
+  my $lddir = $dir."/.rsnap";
 
   if (! -d $lddir) {
     # The .rsnap directory doesn't exist.
@@ -604,7 +657,7 @@ sub get_last_duration
   }
 
   # Try to open the last_duration file
-  open LD, $lddir."/".$job->{"part_quoted"} or return 0;
+  open LD, $lddir."/".quotepart($part) or return 0;
   my $last_duration = int <LD>;
   close LD;
 
@@ -616,15 +669,20 @@ sub get_last_duration
 #
 sub store_last_duration
 {
-  my ($job) = @_;
+  my ($dir, $part, $last_duration) = @_;
 
-  my $lddir = $job->{"dir"}."/.rsnap";
+  # Return if simulating.
+  if ($opt_simulate_on) {
+    return;
+  }
+  
+  my $lddir = $dir."/.rsnap";
 
   mkdirp($lddir);
-
+  
   # Create the last_duration file.
-  open LD, ">".$lddir."/".$job->{"part_quoted"} or return 0;
-  print LD $job->{"last_duration"};
+  open LD, ">".$lddir."/".quotepart($part) or return 0;
+  print LD $last_duration;
   close LD;
 }
 
@@ -724,25 +782,25 @@ sub next_backup_job
 
   my ($thread_number) = @_;
 
+  my $json = JSON->new;
+  
   for (my $i = 0; $i <= $#scheduled_jobs; $i++) {
     my $index = $i;
     if ($thread_number % 2 == 1) {
       # Odd thread, consume jobs from bottom
-      $index = $#scheduled_jobs + 1 - $i;
+      $index = $#scheduled_jobs - $i;
     }
 
-    my $job = $scheduled_jobs[$index];
+    my $job_json = $scheduled_jobs[$index];
+    my $job = $json->decode($job_json);
     my $host = $scheduled_hosts{$job->{"hostname"}};
 
     # Check if the host in question still has capacity for this job.
     if ($host->{"in_progress"} < $host->{"host_parallel"}) {
       # Yes, there is enough capacity
 
-      # Remove the job from the list of jobs.
-      for (my $j = $index; $j <= $#scheduled_jobs-1; $j++) {
-	$scheduled_jobs[$j] = $scheduled_jobs[$j+1];
-      }
-      pop @scheduled_jobs;
+      # Remove the job from the list of scheduled jobs.
+      splice @scheduled_jobs, $index, 1;
 
       # This host has one more job in progress.
       $host->{"in_progress"}++;
@@ -778,7 +836,7 @@ sub backup_job_done
   $host->{"bytes_total"} += $bytes_total;
   $host->{"bytes_sent"} += $bytes_sent;
   $host->{"duration"} += $duration;
-  $host->{"jobs_done"}++;
+ $host->{"jobs_done"}++;
   if ($host->{jobs_done} == $host->{jobs}) {
     $progress{hosts_done}++;
   }
@@ -794,7 +852,7 @@ sub backup_job_done
   } else {
     # Store duration only if the job was successful. Otherwise leave
     # the file in place and don't overwrite it.
-    store_last_duration($job);
+    store_last_duration($host->{dir}, $job->{part}, $duration);
   }
   
   printf
@@ -804,8 +862,6 @@ sub backup_job_done
       $status,
       format_duration($duration);
 
-  # Push the finished job into the "finished_jobs" queue.
-  push @finished_jobs, $job;
   $progress{jobs_done}++;
 }
 
@@ -816,8 +872,13 @@ sub backup_initialize_host
 {
   my ($host) = @_;
 
-  my $root = $host->{"dir"};
+  # Return if simulating.
+  if ($opt_simulate_on) {
+    return;
+  }
 
+  my $root = $host->{dir};
+  
   # Create new working directories.
   mkdirp($root."/".$config{"archive_name"});
   mkdirp($root."/".$config{"archive_name"}.".items");
@@ -829,8 +890,8 @@ sub backup_initialize_host
 sub backup_finalize
 {
   my ($host) = @_;
-  my $root = $host->{"dir"};
-
+  my $root = $host->{dir};
+  
   if ($host->{"errors"} == 0) {
 
     # Rename the "working" directory.
@@ -924,9 +985,8 @@ sub backup
 {
   my ($job, $tempdir) = @_;
 
-  my $root = $job->{"dir"};
-
   my $host = $scheduled_hosts{$job->{"hostname"}};
+  my $root = $host->{dir};
 
   my $rsync_command = $config{"rsync_program"}." ".$host->{rsync_options};
 
@@ -941,14 +1001,16 @@ sub backup
   $rsync_command .= " --rsh=\"".$config{"rsh_program"}."\"";
 
   # Append excludes
-  $rsync_command .= " ".$job->{"exclude"};
+  $rsync_command .= " ".$host->{"exclude"};
 
   # Create the filter file if necessary
   if (defined $job->{"filter"}) {
-    open FILTER, ">".$tempdir."/filter";
-    print FILTER $job->{"filter"};
-    print FILTER "\n";
-    close FILTER;
+    if (!$opt_simulate_on) {
+      open FILTER, ">".$tempdir."/filter";
+      print FILTER $job->{"filter"};
+      print FILTER "\n";
+      close FILTER;
+    }
     $rsync_command .= " \"--filter=. ".$tempdir."/filter\"";
   }
 
@@ -961,50 +1023,53 @@ sub backup
   $rsync_command .= " ".$job->{"hostname"}.":/";
   $rsync_command .= " ".$root."/".$config{"archive_name"}."/";
 
-  my $files_total;
-  my $files_sent;
-  my $bytes_total;
-  my $bytes_sent;
+  my $status = 0;
+  my $files_total = 0;
+  my $files_sent = 0;
+  my $bytes_total = 0;
+  my $bytes_sent = 0;
 
-  my $info_file = $root."/".$config{"archive_name"}.".items/".$job->{"part_quoted"}.".txt";
+  my $info_file = $root."/".$config{"archive_name"}.".items/".quotepart($job->{part}).".txt";
 
-  # Print filter to .items file.
-  open INFO, ">$info_file";
-  print INFO "Filter:\n";
-  print INFO $job->{filter};
-  print INFO "\n";
-  print INFO "rsync command:\n";
-  print INFO "$rsync_command\n";
-  print INFO "\n";
-  close INFO;
-
-  # Execute command
-  system($rsync_command." 2>&1 >>$info_file");
-
-  # Status code
-  my $status = $? >> 8;
-
-  # Parse the output.
-  open ITEMS, $info_file;
-  while (my $line = <ITEMS>) {
-    # Strip some characters.
-    $line =~ s/[,\.]//g;
-
-    if ($line =~ /^Number of files: (\d+)\D/) {
-      $files_total = $1;
-    } elsif ($line =~ /^Number of (regular )?files transferred: (\d+)\D/) {
+  if (!$opt_simulate_on) {
+    # Print filter to .items file.
+    open INFO, ">$info_file";
+    print INFO "Filter:\n";
+    print INFO $job->{filter};
+    print INFO "\n";
+    print INFO "rsync command:\n";
+    print INFO "$rsync_command\n";
+    print INFO "\n";
+    close INFO;
+    
+    # Execute command
+    system($rsync_command." 2>&1 >>$info_file");
+    
+    # Status code
+    $status = $? >> 8;
+    
+    # Parse the output.
+    open ITEMS, $info_file;
+    while (my $line = <ITEMS>) {
+      # Strip some characters.
+      $line =~ s/[,\.]//g;
+      
+      if ($line =~ /^Number of files: (\d+)\D/) {
+        $files_total = $1;
+      } elsif ($line =~ /^Number of (regular )?files transferred: (\d+)\D/) {
       $files_sent = $2;
-    } elsif ($line =~ /^Total file size: (\d+)\D/) {
-      $bytes_total = $1 / (1024*1024);
-    } elsif ($line =~ /^Total transferred file size: (\d+)\D/) {
-      $bytes_sent = $1 / (1024*1024);
+      } elsif ($line =~ /^Total file size: (\d+)\D/) {
+        $bytes_total = $1 / (1024*1024);
+      } elsif ($line =~ /^Total transferred file size: (\d+)\D/) {
+        $bytes_sent = $1 / (1024*1024);
     }
+    }
+    close ITEMS;
+    
+    # Cleanup temporary files
+    unlink $tempdir."/filter" if -f $tempdir."/filter";
   }
-  close ITEMS;
-
-  # Cleanup temporary files
-  unlink $tempdir."/filter" if -f $tempdir."/filter";
-
+  
   return ($status, $files_total, $files_sent, $bytes_total, $bytes_sent);
 }
 
