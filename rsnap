@@ -1,10 +1,11 @@
 #!/usr/bin/perl
 #
-# Copyright (C) 2008-2017 Oliver Hitz <oliver@net-track.ch>
+# Copyright (C) 2008-2018 Oliver Hitz <oliver@net-track.ch>
 #
-use POSIX qw(strftime);
+use POSIX qw(strftime mkfifo);
 use Getopt::Long;
 use File::Basename;
+use File::Temp qw(tempdir);
 use forks;
 use forks::shared;
 use JSON;
@@ -15,6 +16,7 @@ my $opt_debug_on;
 my $opt_force_on;
 my $opt_simulate_on;
 my $opt_no_cleanup;
+my $opt_progress;
 my $opt_configfile = "/etc/rsnap.conf";
 my @opt_groups;
 my @opt_options;
@@ -27,6 +29,7 @@ $SIG{INT} = sub {
 if (!GetOptions( "all" => \$opt_all_on,
 		 "debug" => \$opt_debug_on,
 		 "force" => \$opt_force_on,
+                 "progress" => \$opt_progress,
 		 "simulate" => \$opt_simulate_on,
                  "no-cleanup" => \$opt_no_cleanup,
 		 "config=s" => \$opt_configfile,
@@ -80,17 +83,17 @@ set_default(\%config, "host_parallel", "2");
 set_default(\%config, "exclude", "--exclude=/proc/ --exclude=/sys/");
 set_default(\%config, "snapshot_root", "/data/");
 set_default(\%config, "archive_name", "snapshot");
-set_default(\%config, "temp_dir", "/tmp/");
 set_default(\%config, "rsh_program", "ssh -c arcfour -o StrictHostKeyChecking=no");
 set_default(\%config, "rsync_program", "/usr/bin/rsync");
 set_default(\%config, "rsync_options", "");
-set_default(\%config, "progress_file", "/var/run/rsnap.progress");
 set_default(\%config, "rm_program", "rm");
+set_default(\%config, "fifo", "/var/run/rsnap.fifo");
+set_default(\%config, "temp_dir", tempdir(CLEANUP => 1));
 
-# If forcing, don't create a progress file, we don't want to overwrite
+# If forcing, don't create a name pipe as we don't want to overwrite
 # the file of another rsnap process.
 if ($opt_force_on) {
-  $config{progress_file} = "";
+  $config{fifo} = "";
 }
 
 # Apply options given on the command line.
@@ -103,6 +106,36 @@ for my $option (@opt_options) {
 
     $config{$opt} = $arg;
   }
+}
+
+# Request progress from a running rsnap.
+if ($opt_progress) {
+  if (!-p $config{fifo}) {
+    printf STDERR ("'%s' is not a named pipe.\n", $config{fifo});
+    exit 1;
+  }
+
+  my $progress_dir = tempdir(CLEANUP => 1);
+  my $progress_fifo = $progress_dir."/fifo";
+
+  mkfifo($progress_fifo, 0777);
+
+  # Send command to rsnap  
+  open FIFO, ">$config{fifo}";
+  print FIFO "progress $progress_fifo\n";
+  close FIFO;
+
+  # Receive result
+  open FIFO, "$progress_fifo";
+  while (my $l = <FIFO>) {
+    print $l;
+  }
+  close FIFO;
+  
+  # Delete fifo
+  unlink $progress_fifo;
+  
+  exit 0;
 }
 
 # Check if already running.
@@ -134,8 +167,19 @@ $progress{hosts_done} = 0;
 $progress{jobs_total} = 0;
 $progress{jobs_done} = 0;
 
-# Start the progress thread
-my $progress_threads = threads->create("progress_thread");
+# If the old progress_file is configured, point to the new --progress
+# option.
+if ($config{progress_file} ne "") {
+  open PROGRESS, ">".$config{progress_file};
+  print PROGRESS "Call 'rsnap --progress' to get real-time progress data.\n";
+  close PROGRESS;
+}
+    
+# Start the FIFO thread
+my $fifo_thread;
+if ($config{fifo} ne "") {
+  $fifo_thread = threads->create("fifo_thread");
+}
 
 # Data structure holding information about the individual hosts.
 my %scheduled_hosts : shared;
@@ -271,7 +315,9 @@ sub cleanup
   # Wait for the progress thread to finish.
   if (%progress) {
     $progress{quit} = 1;
-    $progress_threads->join();
+    if ($fifo_thread) {
+      $fifo_thread->join();
+    }
   }
 
   if ($config{lockfile} ne "" && -f $config{lockfile}) {
@@ -279,6 +325,9 @@ sub cleanup
   }
   if ($config{progress_file} ne "" && -f $config{progress_file}) {
     unlink($config{progress_file});
+  }
+  if ($config{fifo} ne "" && -p $config{fifo}) {
+    unlink($config{fifo});
   }
 }
 
@@ -539,19 +588,98 @@ sub schedule_jobs
 }
 
 # ----------------------------------------------------------------------------
-# The progress thread.
+# The FIFO thread.
 #
-sub progress_thread
+sub fifo_thread
 {
-  while (!$progress{quit}) {
-    sleep(1);
+  mkfifo($config{fifo}, 0777);
 
-    {
-      lock($rsnap_lock);
-      update_progress();
+  my $fifo_fh;
+  open($fifo_fh, "+<".$config{fifo});
+  
+  my $sel = IO::Select->new();
+  $sel->add($fifo_fh);
+
+  my $buffer;
+  
+  while (!$progress{quit}) {
+    my @ready = $sel->can_read(0.5);
+    if (@ready) {
+      my $read_buffer;
+      
+      my $rv = sysread $fifo_fh, $read_buffer, 1024;
+      if (not defined $rv) {
+        # Error reading from pipe: $!
+      } elsif ($rv == 0) {
+        # End of pipe?
+      }
+
+      $buffer = $buffer . $read_buffer;
+
+      # Parse buffer.
+      while ($buffer =~ /^([^\n]*)\n(.*)$/) {
+        my $line = $1;
+        $buffer = $2;
+
+        if ($line =~ /^progress\ (.*)$/) {
+          my $output_fifo = $1;
+
+          write_progress($output_fifo);
+        }
+      }
     }
   }
 }
+
+sub write_progress
+{
+  my $output_fifo = shift;
+      
+  my $now = time();
+  
+  open PROGRESS, ">$output_fifo" or return;
+  
+  printf PROGRESS
+      "Started: %s, %s ago.\n\n",
+      strftime("%Y%m%d %H:%M:%S", localtime($started)),
+      format_duration($now - $started);
+  
+  my $phase = $progress{phase};
+  $phase =~ s/%a/$progress{hosts_done}/g;
+  $phase =~ s/%b/$progress{hosts_total}/g;
+  $phase =~ s/%c/$progress{jobs_done}/g;
+  $phase =~ s/%d/$progress{jobs_total}/g;
+
+  printf PROGRESS
+      "Phase: %s\n\n",
+      $phase;
+
+  if (defined $progress{"thr_state_0"}) {
+    printf PROGRESS "Threads:\n";
+
+    for (my $i = 0; defined($progress{"thr_state_".$i}); $i++) {
+      my $time = "";
+      my $start = $progress{"thr_start_".$i};
+      my $last = $progress{"thr_last_".$i};
+
+      if ($start > 0) {
+        $time = sprintf(" since %s", format_duration($now - $start));
+	if ($last != 0) {
+	  $time .= sprintf(" (last: %s)", format_duration($last));
+	}
+      }
+
+      printf PROGRESS
+        "%d: %s%s\n",
+	$i,
+	$progress{"thr_state_".$i},
+	$time;
+    }
+  }
+
+  close PROGRESS;
+}
+
 
 # ----------------------------------------------------------------------------
 # The backup main program.
@@ -562,7 +690,7 @@ sub backup_thread
   debug("Backup thread $thread_number: started.\n");
 
   # Initialize thread environment
-  my $tempdir = $config{"temp_dir"}."/rsnap.".$$.".".$thread_number;
+  my $tempdir = $config{"temp_dir"}."/rsnap.thread.".$thread_number;
 
   # Ensure the temporary directory doesn't exist
   if (-d $tempdir) {
@@ -710,58 +838,6 @@ sub has_backup_jobs
 }
 
 # ----------------------------------------------------------------------------
-# Update the progress file.
-#
-sub update_progress
-{
-  if ($config{progress_file} ne "") {
-    my $now = time();
-
-    open PROGRESS, ">".$config{progress_file} or return;
-
-    printf PROGRESS
-	"Started: %s, %s ago.\n\n",
-	strftime("%Y%m%d %H:%M:%S", localtime($started)),
-	format_duration($now - $started);
-
-    my $phase = $progress{phase};
-    $phase =~ s/%a/$progress{hosts_done}/g;
-    $phase =~ s/%b/$progress{hosts_total}/g;
-    $phase =~ s/%c/$progress{jobs_done}/g;
-    $phase =~ s/%d/$progress{jobs_total}/g;
-
-    printf PROGRESS
-        "Phase: %s\n\n",
-        $phase;
-
-    if (defined $progress{"thr_state_0"}) {
-      printf PROGRESS "Threads:\n";
-
-      for (my $i = 0; defined($progress{"thr_state_".$i}); $i++) {
-        my $time = "";
-        my $start = $progress{"thr_start_".$i};
-        my $last = $progress{"thr_last_".$i};
-
-        if ($start > 0) {
-	  $time = sprintf(" since %s", format_duration($now - $start));
-	  if ($last != 0) {
-	    $time .= sprintf(" (last: %s)", format_duration($last));
-	  }
-        }
-
-        printf PROGRESS
-	    "%d: %s%s\n",
-	    $i,
-	    $progress{"thr_state_".$i},
-	    $time;
-      }
-    }
-
-    close PROGRESS;
-  }
-}
-
-# ----------------------------------------------------------------------------
 # Set progress "Phase:" string.
 #
 sub set_phase
@@ -783,6 +859,7 @@ sub next_backup_job
   my ($thread_number) = @_;
 
   my $json = JSON->new;
+  $json->allow_nonref;
   
   for (my $i = 0; $i <= $#scheduled_jobs; $i++) {
     my $index = $i;
@@ -794,7 +871,7 @@ sub next_backup_job
     my $job_json = $scheduled_jobs[$index];
     my $job = $json->decode($job_json);
     my $host = $scheduled_hosts{$job->{"hostname"}};
-
+    
     # Check if the host in question still has capacity for this job.
     if ($host->{"in_progress"} < $host->{"host_parallel"}) {
       # Yes, there is enough capacity
