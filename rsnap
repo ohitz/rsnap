@@ -122,7 +122,7 @@ if ($opt_progress) {
 
   mkfifo($progress_fifo, 0777);
 
-  # Send command to rsnap  
+  # Send command to rsnap
   open FIFO, ">$config{fifo}";
   print FIFO "progress $progress_fifo\n";
   close FIFO;
@@ -133,10 +133,10 @@ if ($opt_progress) {
     print $l;
   }
   close FIFO;
-  
+
   # Delete fifo
   unlink $progress_fifo;
-  
+
   exit 0;
 }
 
@@ -149,7 +149,7 @@ if ($opt_force_on) {
     if (!$opt_simulate_on && $opt_all_on) {
       send_backup_report("\nNot starting rsnap because it is still running.\n");
     }
-    
+
     printf STDERR ("Lock file '%s' exists, is rsnap already running?\n",
 		   $config{lockfile});
     exit 1;
@@ -243,7 +243,7 @@ if (!$opt_simulate_on) {
     my $reports_dir = $config{"reports_dir"};
     if (-d $reports_dir) {
       my $report_name = sprintf("rsnap.%s.txt", strftime("%Y%m%d-%H%M%S", localtime($started)));
-      
+
       if (open REPORT, ">".$reports_dir."/".$report_name) {
         print REPORT $report;
         close REPORT;
@@ -254,7 +254,7 @@ if (!$opt_simulate_on) {
       printf STDERR ("reports_dir `%s' is not a directory.\n", $reports_dir);
     }
   }
-  
+
   # Create backup report.
   send_backup_report($report);
 }
@@ -280,25 +280,25 @@ if (!$opt_simulate_on && !$opt_no_cleanup) {
   foreach my $h (sort keys %scheduled_hosts) {
     push @cleanup_dirs, $scheduled_hosts{$h}{dir};
   }
-  
+
   set_phase("Cleaning up (done %a/%b hosts)");
-  
+
   $progress{hosts_total} = scalar @cleanup_dirs;
   $progress{hosts_done} = 0;
-  
+
   @threads = ();
-  
+
   for (my $i = 0; $i < $config{cleanup_threads}; $i++) {
     push @threads, threads->create("cleanup_thread", $i);
     $progress{"thr_state_".$i} = "<idle>";
     $progress{"thr_start_".$i} = 0;
   }
-  
+
   # Call during_all_cleanup_hook if defined.
   if ($opt_all_on && defined $config{during_all_cleanup_hook}) {
     call_hook($config{during_all_cleanup_hook});
   }
-  
+
   # Now, wait for the cleanup threads to finish.
   for my $thread (@threads) {
     $thread->join;
@@ -371,14 +371,14 @@ sub quotepart
 sub schedule_jobs
 {
   my @jobs;
-  
+
   for my $h (keys %hosts) {
     my $host = $hosts{$h};
-    
+
     if (!$opt_all_on) {
-      
+
       my $skip = 1;
-      
+
       # If we have groups selected, check if this host belongs to one of
       # the selected groups.
       if (0 != scalar @opt_groups) {
@@ -389,18 +389,18 @@ sub schedule_jobs
           }
         }
       }
-      
+
       # If hosts are selected, check if the current one is among the
       # selected ones.
       if (defined($rsnap_hosts{$h})) {
         $skip = 0;
       }
-      
+
       if ($skip) {
         next;
       }
     }
-    
+
     # Check weekday if the current host is supposed only to be backed
     # up on specific days.
     if (defined($host->{"weekdays"})) {
@@ -409,11 +409,11 @@ sub schedule_jobs
         next;
       }
     }
-    
+
     # Create the host structure.
     $scheduled_hosts{$h} = &share({});
     $scheduled_hosts{$h}{"hostname"} = $h;
-    
+
     if (defined $host->{"host_parallel"}) {
       $scheduled_hosts{$h}{"host_parallel"} = $host->{"host_parallel"};
     } else {
@@ -444,7 +444,7 @@ sub schedule_jobs
     } else {
       $scheduled_hosts{$h}{rsync_options} = $config{rsync_options};
     }
-    
+
     # Hook executed after this host has been backed up.
     my $hook;
     if (defined($host->{after_host_backup_hook})) {
@@ -460,40 +460,40 @@ sub schedule_jobs
       $scheduled_hosts{$h}{after_host_backup_hook}{email_from} = $hook->{email_from};
       $scheduled_hosts{$h}{after_host_backup_hook}{email_subject} = $hook->{email_subject};
     }
-    
+
     $scheduled_hosts{$h}{"initialized"} = undef;
-    
+
     $scheduled_hosts{$h}{"errors"} = 0;
     $scheduled_hosts{$h}{"error_messages"} = "";
-    
+
     $scheduled_hosts{$h}{"files_total"} = 0;
     $scheduled_hosts{$h}{"files_sent"} = 0;
     $scheduled_hosts{$h}{"bytes_total"} = 0;
     $scheduled_hosts{$h}{"bytes_sent"} = 0;
     $scheduled_hosts{$h}{"duration"} = 0;
-    
+
     $scheduled_hosts{$h}{"jobs"} = 0;
-    
+
     my $snapshot_dir = $scheduled_hosts{$h}{dir}."/".$config{"archive_name"}.".latest";
-    
+
     my @filters;
-    
+
     if ($host->{parallel_path} ne "") {
       $host->{parallel_paths} = [ $host->{parallel_path} ];
     }
-    
+
     # If parallel_path is configured, define filters so that the
     # contents of these path is backed up in parallel.
     if ($host->{ parallel_paths } && 0 != scalar @{ $host->{parallel_paths} }) {
       my @subdirs;
-      
+
       # Enumerate all subdirectories already backed up.
       foreach my $parallel_path (@{ $host->{parallel_paths} }) {
         # Strip trailing slash.
         $parallel_path =~ s/\/$//;
-        
+
         my $parallel_dir = $snapshot_dir."/".$parallel_path;
-        
+
         if (-d $parallel_dir) {
           opendir(DIR, $parallel_dir);
           while (my $entry = readdir(DIR)) {
@@ -503,40 +503,40 @@ sub schedule_jobs
             if (! -d $parallel_dir."/".$entry) {
               next;
             }
-            
+
             push @subdirs, $parallel_path."/".$entry;
           }
           closedir DIR;
-        }      
+        }
       }
-      
+
       # Create filters for each subdirectory to be backed up in
       # parallel.
       foreach my $subdir (sort @subdirs) {
         my $entry = $subdir;
         $entry =~ s/[\/\ ]/_/g;
-        
+
         my $filter = {
           "part" => "part-$entry",
           "expr" => ""
         };
-        
+
         my $parent = dirname($subdir);
-        
+
         # Include directories from the root to the current subdirectory.
         foreach my $dirpart (dirparts($subdir)) {
           $filter->{expr} .= "+ $dirpart/\n";
         }
-        
+
         # Exclude the rest.
         foreach my $dirpart (reverse dirparts($parent)) {
           $filter->{expr} .= "- $dirpart/*\n";
         }
         $filter->{expr} .= "- /*\n";
-        
+
         push @filters, $filter;
       }
-      
+
       # Create filter taking care of the rest.
       my $filter = {
         "part" => "rest",
@@ -545,10 +545,10 @@ sub schedule_jobs
       foreach my $subdir (@subdirs) {
         $filter->{expr} .= "- $subdir/\n";
       }
-      
+
       push @filters, $filter;
     }
-    
+
     if (0 == scalar @filters) {
       my $job = {
         hostname => $h,
@@ -556,7 +556,7 @@ sub schedule_jobs
         last_duration => get_last_duration($scheduled_hosts{$h}{dir}, "full"),
       };
       push @jobs, $job;
-      
+
       $scheduled_hosts{$h}{"jobs"}++;
 
       $progress{jobs_total}++;
@@ -566,7 +566,7 @@ sub schedule_jobs
     } else {
       my $host_dir = $scheduled_hosts{$h}{dir};
       my $num_jobs = 0;
-      
+
       # Iterate through the filters.
       foreach my $f (@filters) {
         my $job = {
@@ -576,12 +576,12 @@ sub schedule_jobs
           filter => $f->{expr}
         };
         push @jobs, $job;
-        
+
         $num_jobs++;
-        
+
         debug("Scheduling job for host $h (".$f->{part}.")\n");
       }
-      
+
       $scheduled_hosts{$h}{"jobs"} += $num_jobs;
 
       $progress{jobs_total} += $num_jobs;
@@ -608,17 +608,17 @@ sub fifo_thread
 
   my $fifo_fh;
   open($fifo_fh, "+<".$config{fifo});
-  
+
   my $sel = IO::Select->new();
   $sel->add($fifo_fh);
 
   my $buffer;
-  
+
   while (!$progress{quit}) {
     my @ready = $sel->can_read(0.5);
     if (@ready) {
       my $read_buffer;
-      
+
       my $rv = sysread $fifo_fh, $read_buffer, 1024;
       if (not defined $rv) {
         # Error reading from pipe: $!
@@ -646,16 +646,16 @@ sub fifo_thread
 sub write_progress
 {
   my $output_fifo = shift;
-      
+
   my $now = time();
-  
+
   open PROGRESS, ">$output_fifo" or return;
-  
+
   printf PROGRESS
       "Started: %s, %s ago.\n\n",
       strftime("%Y%m%d %H:%M:%S", localtime($started)),
       format_duration($now - $started);
-  
+
   my $phase = $progress{phase};
   $phase =~ s/%a/$progress{hosts_done}/g;
   $phase =~ s/%b/$progress{hosts_total}/g;
@@ -676,16 +676,16 @@ sub write_progress
 
       if ($start > 0) {
         $time = sprintf(" since %s", format_duration($now - $start));
-	if ($last != 0) {
-	  $time .= sprintf(" (last: %s)", format_duration($last));
-	}
+        if ($last != 0) {
+          $time .= sprintf(" (last: %s)", format_duration($last));
+        }
       }
 
       printf PROGRESS
         "%d: %s%s\n",
-	$i,
-	$progress{"thr_state_".$i},
-	$time;
+        $i,
+        $progress{"thr_state_".$i},
+        $time;
     }
   }
 
@@ -718,9 +718,9 @@ sub backup_thread
       debug("Backup thread $thread_number: got job ".$job->{"hostname"}."\n");
 
       $progress{"thr_state_".$thread_number} =
-	  sprintf("%s (%s)",
-		  $job->{hostname},
-		  $job->{part});
+          sprintf("%s (%s)",
+                  $job->{hostname},
+                  $job->{part});
       $progress{"thr_start_".$thread_number} = $start;
       $progress{"thr_last_".$thread_number} = $job->{last_duration};
 
@@ -815,11 +815,11 @@ sub store_last_duration
   if ($opt_simulate_on) {
     return;
   }
-  
+
   my $lddir = $dir."/.rsnap";
 
   mkdirp($lddir);
-  
+
   # Create the last_duration file.
   open LD, ">".$lddir."/".quotepart($part) or return 0;
   print LD $last_duration;
@@ -872,7 +872,7 @@ sub next_backup_job
 
   my $json = JSON->new;
   $json->allow_nonref;
-  
+
   for (my $i = 0; $i <= $#scheduled_jobs; $i++) {
     my $index = $i;
     if ($thread_number % 2 == 1) {
@@ -883,7 +883,7 @@ sub next_backup_job
     my $job_json = $scheduled_jobs[$index];
     my $job = $json->decode($job_json);
     my $host = $scheduled_hosts{$job->{"hostname"}};
-    
+
     # Check if the host in question still has capacity for this job.
     if ($host->{"in_progress"} < $host->{"host_parallel"}) {
       # Yes, there is enough capacity
@@ -896,8 +896,8 @@ sub next_backup_job
 
       # Initialize backup for this host.
       if (!$host->{"initialized"}) {
-	backup_initialize_host($host);
-	$host->{"initialized"} = 1;
+        backup_initialize_host($host);
+        $host->{"initialized"} = 1;
       }
 
       return $job;
@@ -943,7 +943,7 @@ sub backup_job_done
     # the file in place and don't overwrite it.
     store_last_duration($host->{dir}, $job->{part}, $duration);
   }
-  
+
   printf
       "%s (%s) done: status=%d, duration=%s\n",
       $job->{hostname},
@@ -967,7 +967,7 @@ sub backup_initialize_host
   }
 
   my $root = $host->{dir};
-  
+
   # Create new working directories.
   mkdirp($root."/".$config{"archive_name"});
   mkdirp($root."/".$config{"archive_name"}.".items");
@@ -980,7 +980,7 @@ sub backup_finalize
 {
   my ($host) = @_;
   my $root = $host->{dir};
-  
+
   if ($host->{"errors"} == 0) {
 
     # Rename the "working" directory.
@@ -991,21 +991,21 @@ sub backup_finalize
       # Find the newest YYYYMMDD.NNN file.
       opendir(DIR, $root);
       while (my $dir = readdir(DIR)) {
-	if (-d $root."/".$dir && $dir =~ /^$config{"archive_name"}\.$date_now\.(\d.*)$/) {
-	  my $cnt = $1;
-	  if (!defined $cnt_found || ($cnt > $cnt_found)) {
-	    $cnt_found = $1;
-	  }
-	}
+        if (-d $root."/".$dir && $dir =~ /^$config{"archive_name"}\.$date_now\.(\d.*)$/) {
+          my $cnt = $1;
+          if (!defined $cnt_found || ($cnt > $cnt_found)) {
+            $cnt_found = $1;
+          }
+        }
       }
       closedir DIR;
 
       my $suffix;
 
       if (!defined $cnt_found) {
-	$suffix = sprintf("%s.%03d", $date_now, 0);
+        $suffix = sprintf("%s.%03d", $date_now, 0);
       } else {
-	$suffix = sprintf("%s.%03d", $date_now, $cnt_found+1);
+        $suffix = sprintf("%s.%03d", $date_now, $cnt_found+1);
       }
 
       debug("Renaming working directory: ".$root."/".$config{"archive_name"}." -> ".$root."/".$config{"archive_name"}.".".$suffix."\n");
@@ -1014,10 +1014,10 @@ sub backup_finalize
 
       # Remove the "latest" symlink.
       if (-l $root."/".$config{"archive_name"}.".latest") {
-	unlink $root."/".$config{"archive_name"}.".latest";
+        unlink $root."/".$config{"archive_name"}.".latest";
       }
       if (-l $root."/".$config{"archive_name"}.".items.latest") {
-	unlink $root."/".$config{"archive_name"}.".items.latest";
+        unlink $root."/".$config{"archive_name"}.".items.latest";
       }
 
       # Create new "latest" symlink.
@@ -1036,14 +1036,14 @@ sub backup_finalize
     if (! -d $root."/".$config{"archive_name"}.".delete") {
       mkdirp($root."/".$config{"archive_name"}.".delete");
     }
-    
+
     # Get the list of all snapshot.YYYYMMDD directories.
     my @dirs = ();
 
     opendir(DIR, $root);
     while (my $dir = readdir(DIR)) {
       if (-d $root."/".$dir && $dir =~ /^$config{"archive_name"}\.\d+\.\d+$/) {
-	push @dirs, $dir;
+        push @dirs, $dir;
       }
     }
     closedir DIR;
@@ -1060,8 +1060,8 @@ sub backup_finalize
       debug("Renaming directory to delete: ".$root."/".$dir." -> ".$root."/".$config{"archive_name"}.".delete/".$dir."\n");
       rename $root."/".$dir, $root."/".$config{"archive_name"}.".delete/".$dir;
       if (-d $root."/".$dir.".items") {
-	debug("Renaming .items file to delete: ".$root."/".$dir.".items -> ".$root."/".$config{"archive_name"}.".delete/".$dir.".items\n");
-	rename $root."/".$dir.".items", $root."/".$config{"archive_name"}.".delete/".$dir.".items";
+        debug("Renaming .items file to delete: ".$root."/".$dir.".items -> ".$root."/".$config{"archive_name"}.".delete/".$dir.".items\n");
+        rename $root."/".$dir.".items", $root."/".$config{"archive_name"}.".delete/".$dir.".items";
       }
     }
   }
@@ -1130,19 +1130,19 @@ sub backup
     print INFO "$rsync_command\n";
     print INFO "\n";
     close INFO;
-    
+
     # Execute command
     system($rsync_command." 2>&1 >>$info_file");
-    
+
     # Status code
     $status = $? >> 8;
-    
+
     # Parse the output.
     open ITEMS, $info_file;
     while (my $line = <ITEMS>) {
       # Strip some characters.
       $line =~ s/[,\.]//g;
-      
+
       if ($line =~ /^Number of files: (\d+)\D/) {
         $files_total = $1;
       } elsif ($line =~ /^Number of (regular )?files transferred: (\d+)\D/) {
@@ -1154,11 +1154,11 @@ sub backup
     }
     }
     close ITEMS;
-    
+
     # Cleanup temporary files
     unlink $tempdir."/filter" if -f $tempdir."/filter";
   }
-  
+
   return ($status, $files_total, $files_sent, $bytes_total, $bytes_sent);
 }
 
@@ -1169,10 +1169,10 @@ sub create_backup_report()
 {
   # Create and send report.
   my $report = "";
-  
+
   foreach my $h (sort keys %scheduled_hosts) {
     my $host = $scheduled_hosts{$h};
-    
+
     if ($host->{"errors"} > 0) {
       if ($report eq "") {
         $report .= "rsnap errors:\n\n";
@@ -1190,11 +1190,11 @@ sub create_backup_report()
       }
     }
   }
-  
+
   if ($report ne "") {
     $report .= "\n\n";
   }
-  
+
   my $group = {
     "name" => "",
     "hosts" => 0,
@@ -1211,14 +1211,14 @@ sub create_backup_report()
     "bytes_sent" => 0,
     "duration" => 0
   };
-  
+
   $report .= "                                  Files             Size in GB\n";
   $report .= "Host                              Total    Sent     Total    Sent     Time\n";
   $report .= "--------------------------------- -------- -------- -------- -------- --------\n";
-  
+
   foreach my $h (sort { my $o = $scheduled_hosts{$a}{"group"} cmp $scheduled_hosts{$b}{"group"}; if ($o != 0) { return $o; } else { return $a cmp $b; } } keys %scheduled_hosts) {
     my $host = $scheduled_hosts{$h};
-    
+
     if ($host->{"group"} ne $group->{"name"}) {
       if ($group->{"hosts"} > 0) {
         # Print subtotal.
@@ -1232,7 +1232,7 @@ sub create_backup_report()
                            format_duration($group->{duration}));
         $report .= "\n";
       }
-    
+
       $group = {
         "name" => $host->{"group"},
         "hosts" => 0,
@@ -1243,24 +1243,24 @@ sub create_backup_report()
         "duration" => 0
       };
     }
-  
+
     $group->{"hosts"}++;
-  
+
     if ($host->{"errors"} == 0) {
       $report .= sprintf("%-33s %8d %8d %8.2f %8.2f %8s\n",
-  		         $host->{"hostname"},
-		         $host->{"files_total"},
-		         $host->{"files_sent"},
-		         $host->{"bytes_total"} / 1024.0,
-		         $host->{"bytes_sent"} / 1024.0,
+                         $host->{"hostname"},
+                         $host->{"files_total"},
+                         $host->{"files_sent"},
+                         $host->{"bytes_total"} / 1024.0,
+                         $host->{"bytes_sent"} / 1024.0,
                          format_duration($host->{duration}));
-    
+
       $group->{"files_total"} += $host->{"files_total"};
       $group->{"files_sent"} += $host->{"files_sent"};
       $group->{"bytes_total"} += $host->{"bytes_total"};
       $group->{"bytes_sent"} += $host->{"bytes_sent"};
       $group->{"duration"} += $host->{"duration"};
-    
+
       $total->{"files_total"} += $host->{"files_total"};
       $total->{"files_sent"} += $host->{"files_sent"};
       $total->{"bytes_total"} += $host->{"bytes_total"};
@@ -1273,22 +1273,22 @@ sub create_backup_report()
   if ($group->{"name"} ne "") {
     $report .= "--------------------------------- -------- -------- -------- -------- --------\n";
     $report .= sprintf("%-33s %8d %8d %8.2f %8.2f %8s\n",
-		       "Total ".$group->{"name"},
-		       $group->{"files_total"},
-		       $group->{"files_sent"},
-		       $group->{"bytes_total"} / 1024.0,
-		       $group->{"bytes_sent"} / 1024.0,
+                       "Total ".$group->{"name"},
+                       $group->{"files_total"},
+                       $group->{"files_sent"},
+                       $group->{"bytes_total"} / 1024.0,
+                       $group->{"bytes_sent"} / 1024.0,
                        format_duration($group->{duration}));
   }
 
   # Print grand total.
   $report .= "--------------------------------- -------- -------- -------- -------- --------\n";
   $report .= sprintf("%-33s %8d %8d %8.2f %8.2f %8s\n",
-		     "Total",
-		     $total->{"files_total"},
-		     $total->{"files_sent"},
-		     $total->{"bytes_total"} / 1024.0,
-		     $total->{"bytes_sent"} / 1024.0,
+                     "Total",
+                     $total->{"files_total"},
+                     $total->{"files_sent"},
+                     $total->{"bytes_total"} / 1024.0,
+                     $total->{"bytes_sent"} / 1024.0,
                      format_duration($total->{duration}));
 
   debug($report);
@@ -1302,7 +1302,7 @@ sub create_backup_report()
 sub send_backup_report()
 {
   my $report = shift;
-  
+
   # Send report by email if configured.
   if ($config{email_to} ne "") {
     send_email($config{email_from},
