@@ -312,12 +312,12 @@ exit 0;
 
 sub cleanup
 {
-  # Wait for the progress thread to finish.
-  if (%progress) {
-    $progress{quit} = 1;
-    if ($fifo_thread) {
-      $fifo_thread->join();
-    }
+  # Signal quit to auxiliary threads.
+  $progress{quit} = 1;
+
+  # Wait for them to quit.
+  if ($fifo_thread) {
+    $fifo_thread->join();
   }
 
   if ($config{lockfile} ne "" && -f $config{lockfile}) {
