@@ -8,6 +8,7 @@ use File::Basename;
 use File::Temp qw(tempdir);
 use forks;
 use forks::shared;
+use Sys::Syslog;
 use JSON;
 use strict;
 
@@ -89,6 +90,7 @@ set_default(\%config, "rsync_options", "");
 set_default(\%config, "rm_program", "rm");
 set_default(\%config, "fifo", "/var/run/rsnap.fifo");
 set_default(\%config, "temp_dir", tempdir(CLEANUP => 1));
+set_default(\%config, "log_interval", 300);
 
 # If forcing, don't create a name pipe as we don't want to overwrite
 # the file of another rsnap process.
@@ -174,11 +176,17 @@ if ($config{progress_file} ne "") {
   print PROGRESS "Call 'rsnap --progress' to get real-time progress data.\n";
   close PROGRESS;
 }
-    
+
 # Start the FIFO thread
 my $fifo_thread;
 if ($config{fifo} ne "") {
   $fifo_thread = threads->create("fifo_thread");
+}
+
+# Start the logger thread
+my $logger_thread;
+if ($config{log_interval} != 0) {
+  $logger_thread = threads->create("logger_thread", $config{log_interval});
 }
 
 # Data structure holding information about the individual hosts.
@@ -319,7 +327,11 @@ sub cleanup
   if ($fifo_thread) {
     $fifo_thread->join();
   }
+  if ($logger_thread) {
+    $logger_thread->join();
+  }
 
+  # Clean up.
   if ($config{lockfile} ne "" && -f $config{lockfile}) {
     unlink $config{lockfile};
   }
@@ -1403,4 +1415,37 @@ sub call_hook
                $subject,
                $report);
   }
+}
+
+# ----------------------------------------------------------------------------
+# Logger thread
+#
+sub logger_thread
+{
+  my $log_interval = shift;
+
+  my $next_log = time();
+
+  # Start logging
+  openlog("rsnap", "ndelay,pid", "daemon");
+
+  while (!$progress{quit}) {
+    if (time() >= $next_log) {
+      my $phase = $progress{phase};
+      $phase =~ s/%a/$progress{hosts_done}/g;
+      $phase =~ s/%b/$progress{hosts_total}/g;
+      $phase =~ s/%c/$progress{jobs_done}/g;
+      $phase =~ s/%d/$progress{jobs_total}/g;
+
+      syslog("LOG_INFO", $phase);
+
+      $next_log = $next_log + $log_interval;
+    }
+
+    select(undef, undef, undef, 0.25);
+  }
+
+  syslog("LOG_INFO", "Finishing.");
+
+  closelog();
 }
